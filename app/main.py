@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.database import DatabaseCheck, database, get_database_check
+from app.evidence import EvidenceBundle
 from app.lab import (
     ActiveIncidentError,
     IncidentLab,
@@ -26,11 +27,32 @@ from app.models import (
     ScenarioType,
     WorkloadResponse,
 )
+from app.tools.collector import IncidentEvidenceCollector
+from app.tools.database import (
+    ApplicationPoolDiagnosticTool,
+    PostgreSQLDiagnosticTool,
+)
+from app.tools.deployments import DeploymentDiagnosticTool
+from app.tools.incidents import IncidentEventTool, IncidentMetadataTool
+from app.tools.logs import ApplicationLogDiagnosticTool
+from app.tools.runbooks import RunbookDiagnosticTool
 
-configure_logging()
-logger = logging.getLogger(__name__)
 settings = get_settings()
+configure_logging(settings)
+logger = logging.getLogger(__name__)
 incident_lab = build_incident_lab(database, settings)
+evidence_collector = IncidentEvidenceCollector(
+    metadata=IncidentMetadataTool(incident_lab.store),
+    events=IncidentEventTool(incident_lab.store, settings.diagnostic_result_limit),
+    postgresql=PostgreSQLDiagnosticTool(database, settings.diagnostic_result_limit),
+    pool=ApplicationPoolDiagnosticTool(database, settings),
+    deployments=DeploymentDiagnosticTool(
+        incident_lab.store, settings.diagnostic_result_limit
+    ),
+    logs=ApplicationLogDiagnosticTool(settings),
+    runbooks=RunbookDiagnosticTool(),
+    maximum_items=settings.evidence_result_limit,
+)
 
 
 class HealthResponse(BaseModel):
@@ -59,6 +81,10 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 def get_incident_lab() -> IncidentLab:
     return incident_lab
+
+
+def get_evidence_collector() -> IncidentEvidenceCollector:
+    return evidence_collector
 
 
 @app.middleware("http")
@@ -167,6 +193,22 @@ async def get_incident(
     except IncidentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+
+
+@app.get(
+    "/demo/incidents/{incident_id}/evidence",
+    response_model=EvidenceBundle,
+)
+async def get_incident_evidence(
+    incident_id: UUID,
+    collector: Annotated[IncidentEvidenceCollector, Depends(get_evidence_collector)],
+) -> EvidenceBundle:
+    try:
+        return await collector.collect(incident_id)
+    except IncidentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found"
         ) from exc
 
 

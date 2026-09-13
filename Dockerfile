@@ -8,10 +8,12 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY app ./app
 COPY db ./db
+COPY runbooks ./runbooks
 
 RUN pip install --no-cache-dir . \
     && groupadd --system incident-agent \
     && useradd --system --gid incident-agent --home-dir /app incident-agent \
+    && mkdir -p /app/logs \
     && chown -R incident-agent:incident-agent /app
 
 USER incident-agent

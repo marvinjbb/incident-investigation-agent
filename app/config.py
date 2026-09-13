@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     incident_max_duration_seconds: int = 15
     incident_history_limit: int = 100
     deployment_history_limit: int = 100
+    diagnostic_result_limit: int = 25
+    evidence_result_limit: int = 100
+    log_path: str = "logs/application.jsonl"
+    log_max_bytes: int = 1_000_000
+    log_backup_count: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",

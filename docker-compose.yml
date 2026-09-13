@@ -29,12 +29,15 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-incident_app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-incident_lab_dev}
       DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS:-3}
+      LOG_PATH: /app/logs/application.jsonl
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+    volumes:
+      - incident-application-logs:/app/logs
     logging:
       driver: json-file
       options:
@@ -43,3 +46,4 @@ services:
 
 volumes:
   incident-postgres-data:
+  incident-application-logs:

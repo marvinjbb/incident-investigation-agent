@@ -2,25 +2,29 @@
 
 A production-style portfolio system for evidence-based investigation of application and PostgreSQL incidents. The finished system will gather logs, run restricted database diagnostics, inspect deployments, consult runbooks, construct a timeline, and produce a supported root-cause assessment. Any future corrective action will require explicit human approval.
 
-Phase 2 provides a controlled incident simulation lab. It creates genuine technical evidence for three bounded scenarios, but it does **not** yet contain an AI investigator, LLM integration, automated root-cause analysis, or remediation.
+Phase 3 adds restricted diagnostic tools, deterministic runbook retrieval, and a normalized evidence API on top of the controlled incident lab. It still contains **no** AI investigator, LLM integration, automated root-cause analysis, or remediation.
 
-## Phase 2 architecture
+## Phase 3 architecture
 
 ```text
-Demo client
-   |
-   v
-Allowlisted FastAPI incident routes
-   |
-   +--> IncidentLab coordinator ----> machine-readable timeline events
-   |          |
-   |          +--> PostgreSQL row lock + blocked session
-   |          +--> bounded application pool saturation
-   |          +--> v2-bad deployment + incompatible query
-   |
-   +--> PostgreSQL incident/deployment metadata
-   +--> structured JSON application logs
-   +--> bounded application workload pool
+Demo incident --> Application + PostgreSQL --> Technical evidence
+                                                   |
+                                                   v
+                                      Restricted diagnostic tools
+                                      |-- incident events
+                                      |-- rotating application logs
+                                      |-- PostgreSQL locks/connections
+                                      |-- application pool state
+                                      |-- deployment history
+                                      `-- allowlisted runbooks
+                                                   |
+                                                   v
+                                         Evidence collector
+                                                   |
+                                                   v
+                                         Structured evidence API
+
+Future: Structured evidence --> AI investigator
 ```
 
 Docker Compose runs the API and PostgreSQL on a private network. The API uses the Compose service name `db`, not container-local `localhost`. PostgreSQL health gates API startup, and the application applies the small idempotent schema at startup so existing development volumes receive schema updates safely.
@@ -56,7 +60,28 @@ The lab records and activates `v2-bad`. While active, `/demo/workload` executes 
 
 This is a single-process portfolio lab. Multi-process coordination, authentication, and public rate limiting belong to a later deployment-hardening phase.
 
-## Evidence sources
+## Restricted diagnostics and evidence
+
+The `app/tools` package is the sole diagnostic boundary intended for a future
+investigator. Tools accept typed, narrow inputs and return application-owned
+`EvidenceItem` records. Each record has an application-generated ID, source,
+type, optional timestamp and incident ID, factual summary, sanitized structured
+details, and a logical source reference. The collector combines records but does
+not rank evidence, infer a cause, create a timeline, or recommend remediation.
+
+The PostgreSQL tools execute fixed read-only queries against system views. There
+is no SQL, identifier, table, or command supplied by a client. The log tool reads
+only the configured application JSONL path, applies equality filters, skips
+malformed records, redacts secret-bearing fields, and caps results. The runbook
+tool maps the three scenario enum values to three fixed filenames; it never
+accepts a path.
+
+Application logs are emitted as structured JSON to both stdout and a rotating
+JSONL file. The file defaults to 1 MB with two backups and is mounted in a named
+Docker volume. This preserves stdout operations while making bounded log evidence
+programmatically available.
+
+### Evidence sources
 
 Incident and deployment metadata are stored in PostgreSQL. `incident_events` records non-AI source events including:
 
@@ -70,13 +95,18 @@ Incident and deployment metadata are stored in PostgreSQL. `incident_events` rec
 - `recovery_requested`
 - `incident_recovered`
 
-Application logs are JSON on stdout and are available through:
+Application logs remain available through stdout:
 
 ```bash
 docker compose logs api
 ```
 
 They include event type and bounded context such as incident ID, scenario, request path, deployment version, and exception type. Passwords, connection strings, tokens, prompts, and stack traces are not logged.
+
+Three concise runbooks live in `runbooks/`: `blocked-query.md`,
+`connection-exhaustion.md`, and `bad-deployment.md`. They describe generic
+symptoms, checks, evidence, likely causes, safe actions, approval boundaries, and
+escalation conditions. They do not contain incident-specific conclusions.
 
 ## API
 
@@ -88,6 +118,7 @@ They include event type and bounded context such as incident ID, scenario, reque
 | `POST` | `/demo/incidents/connection-exhaustion` | Saturate the workload pool |
 | `POST` | `/demo/incidents/bad-deployment` | Activate `v2-bad` |
 | `GET` | `/demo/incidents/{incident_id}` | Read incident state and timeline |
+| `GET` | `/demo/incidents/{incident_id}/evidence` | Collect bounded, sanitized source evidence |
 | `POST` | `/demo/incidents/{incident_id}/recover` | Request bounded recovery |
 | `GET` | `/demo/workload` | Exercise the active release and pool |
 | `GET` | `/demo/deployments` | Read deployment history |
@@ -117,6 +148,11 @@ Copy `.env.example` to `.env` for local overrides. The example contains developm
 | `INCIDENT_MAX_DURATION_SECONDS` | Hard duration ceiling | `15` |
 | `INCIDENT_HISTORY_LIMIT` | Retained incident records | `100` |
 | `DEPLOYMENT_HISTORY_LIMIT` | Retained deployment records | `100` |
+| `DIAGNOSTIC_RESULT_LIMIT` | Per-tool result ceiling | `25` |
+| `EVIDENCE_RESULT_LIMIT` | Evidence bundle ceiling | `100` |
+| `LOG_PATH` | Application-controlled JSONL path | `logs/application.jsonl` |
+| `LOG_MAX_BYTES` | Rotating JSONL file size | `1000000` |
+| `LOG_BACKUP_COUNT` | Retained JSONL backups | `2` |
 | `API_PORT` | Optional host-side Compose port | `8000` |
 
 Use real secret management and a strong runtime password outside this local lab.
@@ -143,6 +179,7 @@ curl -X POST http://localhost:8000/demo/incidents/blocked-query \
   -d '{"duration_seconds":8}'
 
 curl http://localhost:8000/demo/incidents/INCIDENT_ID
+curl http://localhost:8000/demo/incidents/INCIDENT_ID/evidence
 curl -X POST http://localhost:8000/demo/incidents/INCIDENT_ID/recover
 ```
 
@@ -178,12 +215,12 @@ ruff check .
 ruff format --check .
 ```
 
-The automated suite uses dependency replacement and in-memory fakes; it does not require Docker or arbitrary sleep timing. Real PostgreSQL behavior is verified separately through the Compose lab.
+The automated suite uses dependency replacement and in-memory fakes; it does not require Docker or arbitrary sleep timing. It covers fixed diagnostic queries, bounds, pool/server distinction, log redaction, runbook allowlisting, evidence collection, and the evidence API. Real PostgreSQL behavior is verified separately through the Compose lab by collecting evidence while each incident is active.
 
 ## Current limitations
 
 - Incident coordination is process-local and intended for one Uvicorn worker.
 - The lab has no authentication or public rate limiting yet.
-- Logs use Docker stdout rather than external aggregation.
+- Logs are local rotating JSONL plus stdout, not a centralized log platform.
 - Schema changes use one idempotent SQL file; a migration framework is not justified yet.
-- No AI investigator or remediation capability exists in Phase 2.
+- No AI investigator or remediation capability exists in Phase 3.
