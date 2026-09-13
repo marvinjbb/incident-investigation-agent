@@ -1,0 +1,58 @@
+CREATE TABLE IF NOT EXISTS demo_lock_target (
+    id integer PRIMARY KEY,
+    value integer NOT NULL
+);
+
+INSERT INTO demo_lock_target (id, value)
+VALUES (1, 0)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS demo_workload (
+    id integer PRIMARY KEY,
+    message text NOT NULL
+);
+
+INSERT INTO demo_workload (id, message)
+VALUES (1, 'workload completed')
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id uuid PRIMARY KEY,
+    scenario text NOT NULL CHECK (scenario IN ('blocked_query', 'connection_exhaustion', 'bad_deployment')),
+    status text NOT NULL CHECK (status IN ('starting', 'active', 'recovering', 'resolved', 'failed')),
+    started_at timestamptz NOT NULL,
+    ended_at timestamptz,
+    description text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS incident_events (
+    event_id bigserial PRIMARY KEY,
+    incident_id uuid NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    event_type text NOT NULL,
+    occurred_at timestamptz NOT NULL DEFAULT now(),
+    details jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS incident_events_incident_time_idx
+ON incident_events (incident_id, occurred_at, event_id);
+
+CREATE TABLE IF NOT EXISTS deployments (
+    deployment_id uuid PRIMARY KEY,
+    version text NOT NULL,
+    deployed_at timestamptz NOT NULL,
+    status text NOT NULL,
+    became_active boolean NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS application_state (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    active_version text NOT NULL
+);
+
+INSERT INTO application_state (singleton, active_version)
+VALUES (true, 'v1')
+ON CONFLICT (singleton) DO NOTHING;
+
+INSERT INTO deployments (deployment_id, version, deployed_at, status, became_active)
+SELECT '00000000-0000-0000-0000-000000000001', 'v1', now(), 'healthy', true
+WHERE NOT EXISTS (SELECT 1 FROM deployments WHERE version = 'v1');

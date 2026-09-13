@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     postgres_user: str = "incident_app"
     postgres_password: SecretStr = SecretStr("incident_lab_dev")
     database_connect_timeout_seconds: int = 3
+    database_pool_size: int = 3
+    database_pool_timeout_seconds: float = 1.0
+    incident_default_duration_seconds: int = 8
+    incident_max_duration_seconds: int = 15
+    incident_history_limit: int = 100
+    deployment_history_limit: int = 100
 
     model_config = SettingsConfigDict(
         env_file=".env",

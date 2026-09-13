@@ -7,6 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
+COPY db ./db
 
 RUN pip install --no-cache-dir . \
     && groupadd --system incident-agent \

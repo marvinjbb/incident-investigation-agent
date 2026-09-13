@@ -13,6 +13,12 @@ services:
       start_period: 5s
     volumes:
       - incident-postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   api:
     build: .
@@ -29,6 +35,11 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   incident-postgres-data:
