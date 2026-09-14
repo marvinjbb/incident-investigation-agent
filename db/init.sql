@@ -71,3 +71,42 @@ CREATE TABLE IF NOT EXISTS investigations (
 
 CREATE INDEX IF NOT EXISTS investigations_incident_started_idx
 ON investigations (incident_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS remediation_proposals (
+    proposal_id uuid PRIMARY KEY,
+    incident_id uuid NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    investigation_id uuid NOT NULL REFERENCES investigations(investigation_id) ON DELETE CASCADE,
+    action_type text NOT NULL CHECK (action_type IN (
+        'terminate_demo_blocker',
+        'release_demo_pool_pressure',
+        'rollback_demo_deployment'
+    )),
+    status text NOT NULL CHECK (status IN (
+        'pending_approval', 'approved', 'executing', 'succeeded',
+        'failed', 'rejected', 'expired'
+    )),
+    summary text NOT NULL,
+    reason text NOT NULL,
+    supporting_evidence_ids jsonb NOT NULL,
+    created_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    approved_at timestamptz,
+    executed_at timestamptz,
+    completed_at timestamptz,
+    execution_result jsonb,
+    verification_result jsonb
+);
+
+CREATE INDEX IF NOT EXISTS remediation_incident_created_idx
+ON remediation_proposals (incident_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS remediation_audit_events (
+    audit_event_id bigserial PRIMARY KEY,
+    proposal_id uuid NOT NULL REFERENCES remediation_proposals(proposal_id) ON DELETE CASCADE,
+    event_type text NOT NULL,
+    occurred_at timestamptz NOT NULL DEFAULT now(),
+    details jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS remediation_audit_proposal_time_idx
+ON remediation_audit_events (proposal_id, occurred_at, audit_event_id);

@@ -41,6 +41,16 @@ from app.models import (
     ScenarioType,
     WorkloadResponse,
 )
+from app.remediation.models import RemediationProposal
+from app.remediation.service import (
+    ProposalExpiredError,
+    ProposalNotFoundError,
+    ProposalPolicyError,
+    ProposalStateError,
+    RemediationExecutionError,
+    RemediationService,
+)
+from app.remediation.store import RemediationStore
 from app.tools.collector import IncidentEvidenceCollector
 from app.tools.database import (
     ApplicationPoolDiagnosticTool,
@@ -68,6 +78,7 @@ evidence_collector = IncidentEvidenceCollector(
     maximum_items=settings.evidence_result_limit,
 )
 investigation_store = InvestigationStore(database)
+remediation_store = RemediationStore(database)
 
 
 def build_tool_registry(incident_id: UUID) -> InvestigationToolRegistry:
@@ -90,6 +101,13 @@ investigator = IncidentInvestigator(
     provider=OpenAIInvestigationProvider(settings),
     registry_factory=build_tool_registry,
     store=investigation_store,
+)
+remediation_service = RemediationService(
+    settings=settings,
+    lab=incident_lab,
+    investigations=investigation_store,
+    proposals=remediation_store,
+    postgresql=PostgreSQLDiagnosticTool(database, settings.diagnostic_result_limit),
 )
 
 
@@ -131,6 +149,10 @@ def get_investigator() -> IncidentInvestigator:
 
 def get_investigation_store() -> InvestigationStore:
     return investigation_store
+
+
+def get_remediation_service() -> RemediationService:
+    return remediation_service
 
 
 @app.middleware("http")
@@ -317,6 +339,99 @@ async def list_incident_investigations(
     except IncidentNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Incident not found") from exc
     return await store.list_for_incident(incident_id)
+
+
+def remediation_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ProposalNotFoundError):
+        return HTTPException(status_code=404, detail="Remediation proposal not found")
+    if isinstance(exc, ProposalExpiredError):
+        return HTTPException(status_code=410, detail="Remediation proposal expired")
+    if isinstance(exc, (ProposalPolicyError, ProposalStateError)):
+        return HTTPException(status_code=409, detail="Remediation cannot proceed")
+    return HTTPException(status_code=502, detail="Remediation failed safely")
+
+
+@app.post(
+    "/demo/investigations/{investigation_id}/remediation-proposals",
+    response_model=RemediationProposal,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_remediation_proposal(
+    investigation_id: UUID,
+    service: Annotated[RemediationService, Depends(get_remediation_service)],
+) -> RemediationProposal:
+    try:
+        return await service.propose(investigation_id)
+    except (ProposalNotFoundError, ProposalPolicyError) as exc:
+        raise remediation_error(exc) from exc
+
+
+@app.get(
+    "/demo/incidents/{incident_id}/remediations",
+    response_model=list[RemediationProposal],
+)
+async def list_incident_remediations(
+    incident_id: UUID,
+    service: Annotated[RemediationService, Depends(get_remediation_service)],
+) -> list[RemediationProposal]:
+    try:
+        return await service.list_for_incident(incident_id)
+    except IncidentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Incident not found") from exc
+
+
+@app.get("/demo/remediations/{proposal_id}", response_model=RemediationProposal)
+async def get_remediation(
+    proposal_id: UUID,
+    service: Annotated[RemediationService, Depends(get_remediation_service)],
+) -> RemediationProposal:
+    try:
+        return await service.get(proposal_id)
+    except ProposalNotFoundError as exc:
+        raise remediation_error(exc) from exc
+
+
+@app.post(
+    "/demo/remediations/{proposal_id}/approve", response_model=RemediationProposal
+)
+async def approve_remediation(
+    proposal_id: UUID,
+    service: Annotated[RemediationService, Depends(get_remediation_service)],
+) -> RemediationProposal:
+    try:
+        return await service.approve(proposal_id)
+    except (ProposalNotFoundError, ProposalExpiredError, ProposalStateError) as exc:
+        raise remediation_error(exc) from exc
+
+
+@app.post("/demo/remediations/{proposal_id}/reject", response_model=RemediationProposal)
+async def reject_remediation(
+    proposal_id: UUID,
+    service: Annotated[RemediationService, Depends(get_remediation_service)],
+) -> RemediationProposal:
+    try:
+        return await service.reject(proposal_id)
+    except (ProposalNotFoundError, ProposalExpiredError, ProposalStateError) as exc:
+        raise remediation_error(exc) from exc
+
+
+@app.post(
+    "/demo/remediations/{proposal_id}/execute", response_model=RemediationProposal
+)
+async def execute_remediation(
+    proposal_id: UUID,
+    service: Annotated[RemediationService, Depends(get_remediation_service)],
+) -> RemediationProposal:
+    try:
+        return await service.execute(proposal_id)
+    except (
+        ProposalNotFoundError,
+        ProposalExpiredError,
+        ProposalPolicyError,
+        ProposalStateError,
+        RemediationExecutionError,
+    ) as exc:
+        raise remediation_error(exc) from exc
 
 
 @app.post("/demo/incidents/{incident_id}/recover", response_model=IncidentDetail)

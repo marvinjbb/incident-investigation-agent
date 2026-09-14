@@ -34,6 +34,8 @@ class JsonFormatter(logging.Formatter):
             "provider_error_param",
             "validation_error_code",
             "record_ids",
+            "proposal_id",
+            "action_type",
         ):
             value = getattr(record, field, None)
             if value is not None:

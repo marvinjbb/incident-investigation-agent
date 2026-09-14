@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     database_pool_size: int = 3
     database_pool_timeout_seconds: float = 1.0
     incident_default_duration_seconds: int = 8
-    incident_max_duration_seconds: int = 15
+    incident_max_duration_seconds: int = 120
     incident_history_limit: int = 100
     deployment_history_limit: int = 100
     diagnostic_result_limit: int = 25
@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     investigation_max_tool_calls: int = 10
     investigation_timeout_seconds: float = 45.0
     investigation_max_output_tokens: int = 3000
+    remediation_proposal_ttl_seconds: int = 300
 
     model_config = SettingsConfigDict(
         env_file=".env",

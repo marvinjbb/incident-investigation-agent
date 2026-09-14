@@ -124,7 +124,7 @@ async def test_duration_is_bounded(demo_client: tuple[AsyncClient, FakeLab]) -> 
         "/demo/incidents/blocked-query", json={"duration_seconds": 1}
     )
     too_long = await client.post(
-        "/demo/incidents/blocked-query", json={"duration_seconds": 60}
+        "/demo/incidents/blocked-query", json={"duration_seconds": 121}
     )
 
     assert too_short.status_code == 422

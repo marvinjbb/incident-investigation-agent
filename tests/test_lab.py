@@ -1,11 +1,11 @@
 import asyncio
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 from app.config import Settings
-from app.lab import ActiveIncidentError, IncidentLab
+from app.lab import ActiveIncidentError, IncidentLab, RemediationPreconditionError
 from app.models import (
     Deployment,
     Incident,
@@ -155,3 +155,28 @@ def test_pool_state_is_bounded_and_structured() -> None:
         "waiting": 0,
         "maximum": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_remediation_rejects_non_active_or_wrong_scenario_incident() -> None:
+    lab = IncidentLab(FakeDatabase(), FakeStore(), Settings())  # type: ignore[arg-type]
+    incident_id = uuid4()
+
+    with pytest.raises(RemediationPreconditionError):
+        await lab.release_demo_pool_pressure(incident_id)
+
+    lab._active_id = incident_id
+    lab._active_scenario = ScenarioType.BAD_DEPLOYMENT
+    with pytest.raises(RemediationPreconditionError):
+        await lab.release_demo_pool_pressure(incident_id)
+
+
+@pytest.mark.asyncio
+async def test_deployment_rollback_requires_active_bad_release() -> None:
+    incident_id = uuid4()
+    lab = IncidentLab(FakeDatabase(), FakeStore(), Settings())  # type: ignore[arg-type]
+    lab._active_id = incident_id
+    lab._active_scenario = ScenarioType.BAD_DEPLOYMENT
+
+    with pytest.raises(RemediationPreconditionError):
+        await lab.rollback_demo_deployment(incident_id)

@@ -65,7 +65,35 @@ class Database:
                 "UPDATE application_state SET active_version = 'v1' "
                 "WHERE singleton = true"
             )
+            await connection.execute(
+                "UPDATE remediation_proposals SET status = 'failed', "
+                "completed_at = now(), execution_result = "
+                '\'{"outcome":"interrupted_by_restart"}\'::jsonb '
+                "WHERE status IN ('approved', 'executing')"
+            )
             await connection.commit()
+
+    async def terminate_controlled_blocker(self) -> bool:
+        """Terminate only the currently blocking incident-lab owned backend."""
+        async with self.control_connection(autocommit=True) as connection:
+            cursor = await connection.execute(
+                """
+                WITH owned_blocker AS (
+                    SELECT blocker.pid
+                    FROM pg_stat_activity AS blocked
+                    CROSS JOIN LATERAL
+                        unnest(pg_blocking_pids(blocked.pid)) AS blocking_pid
+                    JOIN pg_stat_activity AS blocker ON blocker.pid = blocking_pid
+                    WHERE blocked.application_name = 'incident-demo-blocked-query'
+                      AND blocker.application_name = 'incident-demo-lock-holder'
+                    LIMIT 1
+                )
+                SELECT COALESCE(bool_or(pg_terminate_backend(pid)), false) AS terminated
+                FROM owned_blocker
+                """
+            )
+            row = await cursor.fetchone()
+        return bool(row and row["terminated"])
 
     def pool_state(self) -> dict[str, int]:
         stats = self.pool.get_stats()

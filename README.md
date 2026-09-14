@@ -2,7 +2,83 @@
 
 A production-style portfolio system for evidence-based investigation of application and PostgreSQL incidents. The finished system will gather logs, run restricted database diagnostics, inspect deployments, consult runbooks, construct a timeline, and produce a supported root-cause assessment. Any future corrective action will require explicit human approval.
 
-Phase 4 adds a bounded AI incident investigator. The model chooses among the existing restricted tools, reviews returned evidence, and produces a strictly validated, persisted report. Recommendations remain advisory: there is no remediation execution path.
+Phase 5 adds a human-approved remediation boundary around the three synthetic lab scenarios. The AI remains read-only: application policy converts eligible, evidence-backed recommendations into typed proposals, a human must explicitly approve, execution revalidates live ownership, and success requires post-action recovery verification.
+
+## Phase 5 architecture
+
+```text
+Incident
+   |
+   v
+AI Investigator (read-only tools)
+   |
+   v
+Evidence-backed Report
+   |
+   v
+Application Safety Policy
+   |
+   v
+Remediation Proposal (pending approval)
+   |
+   v
+HUMAN APPROVAL
+   |
+   v
+Live Precondition Revalidation
+   |
+   v
+Allowlisted Synthetic Remediation
+   |
+   v
+Post-Action Verification --> succeeded / failed
+```
+
+Investigation, recommendation, proposal, approval, and execution are distinct
+states. The model cannot approve or execute anything, and remediation functions
+are not registered as investigator tools.
+
+### Allowlisted actions
+
+- `terminate_demo_blocker` rediscovers the current PostgreSQL blocking
+  relationship through a fixed query and requires both exact incident-lab
+  application names before calling `pg_terminate_backend`. No PID is accepted
+  from an API client or model output.
+- `release_demo_pool_pressure` stops only the in-process holder task belonging to
+  the currently active connection-exhaustion incident. It never changes pool
+  configuration.
+- `rollback_demo_deployment` operates only while the controlled `v2-bad` release
+  is active and only when trusted history contains healthy `v1`. Clients cannot
+  submit a version.
+
+Proposals expire after five minutes by default. Approval and execution use
+separate endpoints. Execution is claimed atomically from `approved` to
+`executing`; successful repeated calls return the existing result. Every action
+rechecks incident identity, scenario, validated evidence, current active state,
+and target ownership immediately before mutation.
+
+Execution alone is not success. The service verifies incident resolution and a
+healthy demo workload, plus removal of PostgreSQL blocking, restored pool
+availability, or active healthy `v1` as appropriate. Lifecycle events are stored
+in `remediation_audit_events`; safe application logs include IDs, action type,
+status, duration, and error class only.
+
+### Remediation API
+
+```text
+POST /demo/investigations/{investigation_id}/remediation-proposals
+GET  /demo/incidents/{incident_id}/remediations
+GET  /demo/remediations/{proposal_id}
+POST /demo/remediations/{proposal_id}/approve
+POST /demo/remediations/{proposal_id}/reject
+POST /demo/remediations/{proposal_id}/execute
+```
+
+These public-demo endpoints accept application-generated UUIDs only. They never
+accept SQL, PIDs, deployment versions, paths, shell commands, or executable model
+text. Approval currently records an explicit human action without inventing an
+identity. Real operational use would require authentication, authorization,
+strong actor identity, and a distributed coordination design.
 
 ## Phase 4 architecture
 
@@ -38,9 +114,10 @@ Controlled incident --> restricted tools <--> AI investigator
                               evidence-backed validated report
                                             |
                                             v
-                               recommendations only; no action
-
-Future: recommendation --> human approval --> controlled remediation
+                               application safety policy
+                                            |
+                                            v
+                           human-approved bounded remediation
 ```
 
 ## Agentic investigation workflow
@@ -94,7 +171,7 @@ The lab records and activates `v2-bad`. While active, `/demo/workload` executes 
 - Three explicit POST routes; no generic scenario or command endpoint
 - No arbitrary SQL, shell commands, file paths, database names, or release names
 - One active incident per API process
-- Durations from 3 to 15 seconds; default 8 seconds
+- Durations from 3 to 120 seconds; default 8 seconds
 - Application pool fixed to a small configured maximum
 - Incident and deployment history capped at 100 records each by default
 - Docker JSON logs rotated at three 10 MB files per service
@@ -278,6 +355,7 @@ credits:
 
 ```bash
 python scripts/live_evaluations.py
+python scripts/live_remediations.py
 ```
 
 The deterministic evaluator checks scenario-specific conclusions, citation
@@ -291,4 +369,5 @@ remediation claims.
 - Logs are local rotating JSONL plus stdout, not a centralized log platform.
 - Schema changes use one idempotent SQL file; a migration framework is not justified yet.
 - Investigation coordination remains synchronous and process-local.
-- No remediation or human-approval execution capability exists in Phase 4.
+- Remediation is limited to one active synthetic incident in one API process.
+- Approval records an explicit demo action but has no authenticated actor identity yet.

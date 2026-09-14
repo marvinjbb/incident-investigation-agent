@@ -36,6 +36,12 @@ def test_registry_exposes_only_strict_allowlisted_functions() -> None:
     assert all(
         item["parameters"]["additionalProperties"] is False for item in definitions
     )
+    assert not any(
+        "remediat" in item["name"]
+        or "terminate" in item["name"]
+        or "rollback" in item["name"]
+        for item in definitions
+    )
 
 
 @pytest.mark.asyncio

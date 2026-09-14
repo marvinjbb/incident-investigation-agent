@@ -37,6 +37,10 @@ class WorkloadUnavailableError(RuntimeError):
     pass
 
 
+class RemediationPreconditionError(RuntimeError):
+    pass
+
+
 class Store(Protocol):
     async def create_incident(
         self, incident_id: UUID, scenario: ScenarioType, description: str
@@ -197,6 +201,50 @@ class IncidentLab:
             raise IncidentNotFoundError("Incident not found")
         return incident
 
+    async def terminate_demo_blocker(self, incident_id: UUID) -> None:
+        await self._require_active(incident_id, ScenarioType.BLOCKED_QUERY)
+        if not await self.database.terminate_controlled_blocker():
+            raise RemediationPreconditionError(
+                "Controlled blocking relationship is no longer present"
+            )
+        await self.recover(incident_id)
+
+    async def release_demo_pool_pressure(self, incident_id: UUID) -> None:
+        await self._require_active(incident_id, ScenarioType.CONNECTION_EXHAUSTION)
+        state = self.pool_state()
+        if state.available > 0:
+            raise RemediationPreconditionError(
+                "Controlled pool pressure is no longer present"
+            )
+        await self.recover(incident_id)
+
+    async def rollback_demo_deployment(self, incident_id: UUID) -> None:
+        await self._require_active(incident_id, ScenarioType.BAD_DEPLOYMENT)
+        if await self.store.active_version() != "v2-bad":
+            raise RemediationPreconditionError(
+                "The controlled bad release is not active"
+            )
+        history = await self.store.list_deployments()
+        if not any(
+            item.version == "v1" and item.status == "healthy" for item in history
+        ):
+            raise RemediationPreconditionError(
+                "No approved healthy demo release exists"
+            )
+        await self.store.add_event(
+            incident_id,
+            "remediation_rollback_requested",
+            {"from_version": "v2-bad", "to_version": "v1"},
+        )
+        await self.recover(incident_id)
+
+    async def _require_active(self, incident_id: UUID, scenario: ScenarioType) -> None:
+        async with self._lock:
+            if self._active_id != incident_id or self._active_scenario is not scenario:
+                raise RemediationPreconditionError(
+                    "The controlled incident is no longer active"
+                )
+
     async def shutdown(self) -> None:
         async with self._lock:
             if self._stop_event is not None:
@@ -294,9 +342,12 @@ class IncidentLab:
                 )
                 await self._wait(stop_event, duration_seconds)
             finally:
-                await locking_connection.rollback()
-                await blocked_task
-                await blocked_connection.rollback()
+                with suppress(Exception):
+                    await locking_connection.rollback()
+                with suppress(Exception):
+                    await blocked_task
+                with suppress(Exception):
+                    await blocked_connection.rollback()
 
     async def _wait_for_blocking_relationship(self) -> bool:
         for _ in range(20):
