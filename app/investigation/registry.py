@@ -67,11 +67,21 @@ class InvestigationToolRegistry:
             "get_incident": "Get immutable incident metadata and current status.",
             "get_incident_events": "Get bounded machine-generated incident events.",
             "get_application_logs": "Get bounded logs for only this incident.",
-            "get_database_blocking": "Inspect the fixed PostgreSQL blocking query.",
-            "get_database_connections": "Inspect bounded PostgreSQL session counts.",
-            "get_application_pool_state": "Inspect the live application pool state.",
+            "get_database_blocking": (
+                "Inspect PostgreSQL blocking only when waits, locks, or blocked "
+                "queries are suspected."
+            ),
+            "get_database_connections": (
+                "Inspect PostgreSQL session capacity when connection pressure "
+                "must be confirmed or ruled out."
+            ),
+            "get_application_pool_state": (
+                "Inspect the live application pool when pool waits, timeouts, or "
+                "application connection pressure are suspected."
+            ),
             "get_recent_deployments": (
-                "Get bounded deployment history and active version."
+                "Inspect bounded deployment history when events or errors suggest "
+                "a recent application change."
             ),
             "get_runbook": "Get the allowlisted runbook for this incident scenario.",
         }

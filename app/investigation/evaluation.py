@@ -4,6 +4,17 @@ from app.evidence import EvidenceItem, EvidenceType
 from app.investigation.models import InvestigationReport
 from app.models import ScenarioType
 
+ALL_DIAGNOSTIC_TOOLS = {
+    "get_incident",
+    "get_incident_events",
+    "get_application_logs",
+    "get_database_blocking",
+    "get_database_connections",
+    "get_application_pool_state",
+    "get_recent_deployments",
+    "get_runbook",
+}
+
 
 @dataclass(frozen=True)
 class EvaluationResult:
@@ -23,6 +34,7 @@ def evaluate_report(
     conclusion = (
         f"{report.primary_hypothesis.cause} {report.primary_hypothesis.explanation}"
     ).lower()
+    selected_tools = [activity.tool for activity in report.activity_trace]
     checks = {
         "citations_exist": cited.issubset(evidence),
         "tool_budget": report.metrics.tool_calls <= maximum_tool_calls,
@@ -31,12 +43,21 @@ def evaluate_report(
             " executed " not in f" {action.action.lower()} "
             for action in report.recommended_actions
         ),
+        "selective_tool_use": set(selected_tools) != ALL_DIAGNOSTIC_TOOLS,
+        "no_repeated_tools": len(selected_tools) == len(set(selected_tools)),
     }
     if scenario is ScenarioType.BLOCKED_QUERY:
         checks.update(
             {
                 "identifies_blocking": "block" in conclusion or "lock" in conclusion,
                 "cites_blocking": EvidenceType.BLOCKED_SESSION in cited_types,
+                "selected_blocking_diagnostic": (
+                    "get_database_blocking" in selected_tools
+                ),
+                "avoids_unmotivated_pool_or_deployment": not {
+                    "get_application_pool_state",
+                    "get_recent_deployments",
+                }.intersection(selected_tools),
             }
         )
     elif scenario is ScenarioType.CONNECTION_EXHAUSTION:
@@ -50,6 +71,17 @@ def evaluate_report(
                 "does_not_claim_server_exhaustion": not (
                     "postgresql" in conclusion
                     and "max_connections reached" in conclusion
+                ),
+                "selected_pool_diagnostics": {
+                    "get_application_pool_state",
+                    "get_database_connections",
+                }.issubset(selected_tools),
+                "avoids_unmotivated_blocking_or_deployment": not {
+                    "get_database_blocking",
+                    "get_recent_deployments",
+                }.intersection(selected_tools),
+                "does_not_blame_unrelated_deployment": not (
+                    "v2-bad" in conclusion or "deployment" in conclusion
                 ),
             }
         )
@@ -65,6 +97,13 @@ def evaluate_report(
                 "cites_deployment": EvidenceType.DEPLOYMENT_CHANGE in cited_types,
                 "cites_application_error": EvidenceType.APPLICATION_ERROR
                 in cited_types,
+                "selected_deployment_diagnostic": (
+                    "get_recent_deployments" in selected_tools
+                ),
+                "avoids_unmotivated_blocking_or_pool": not {
+                    "get_database_blocking",
+                    "get_application_pool_state",
+                }.intersection(selected_tools),
             }
         )
     return EvaluationResult(passed=all(checks.values()), checks=checks)

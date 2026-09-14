@@ -45,10 +45,13 @@ Future: recommendation --> human approval --> controlled remediation
 
 ## Agentic investigation workflow
 
-The application sends only an incident identifier and eight strict function-tool
-definitions to the OpenAI Responses API. The model selects diagnostics, receives
-each bounded result as explicitly untrusted evidence data, and may request more
-tools. Application code rejects unknown tools and arguments and never exposes a
+The application sends an incident identifier and initially exposes only the
+incident metadata and event tools to the OpenAI Responses API. After that minimal
+context is returned, the full set of eight strict diagnostic definitions becomes
+available. The model must choose tools that confirm or disprove its current
+hypothesis rather than enumerating every capability. It receives each bounded
+result as explicitly untrusted evidence data and may request more tools only when
+needed. Application code rejects unknown tools and arguments and never exposes a
 SQL, filesystem, shell, or remediation capability.
 
 The explicit loop allows at most six model calls and ten total tool calls. Each

@@ -26,6 +26,7 @@ from app.logging_config import log_event
 logger = logging.getLogger(__name__)
 
 SAFE_EVIDENCE_ID = re.compile(r"^ev_[0-9a-f]{20}$")
+INITIAL_CONTEXT_TOOLS = {"get_incident", "get_incident_events"}
 
 
 class InvestigationPersistence(Protocol):
@@ -104,8 +105,15 @@ class IncidentInvestigator:
         try:
             for _ in range(self._settings.investigation_max_iterations):
                 model_calls += 1
+                available_tools = registry.definitions
+                if not trace:
+                    available_tools = [
+                        definition
+                        for definition in available_tools
+                        if definition["name"] in INITIAL_CONTEXT_TOOLS
+                    ]
                 turn = await asyncio.wait_for(
-                    self._provider.respond(history, registry.definitions),
+                    self._provider.respond(history, available_tools),
                     timeout=self._settings.investigation_timeout_seconds,
                 )
                 history.extend(turn.output_items)

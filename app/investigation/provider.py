@@ -13,9 +13,22 @@ logger = logging.getLogger(__name__)
 INVESTIGATOR_INSTRUCTIONS = """
 Determine the most likely cause of an application/database incident using only
 evidence obtained from approved diagnostic tools. Do not assume a cause before
-collecting evidence. Choose the tools you need, examine results, and make
-additional calls when necessary. Request independent relevant diagnostics
-together when possible so the bounded investigation can complete efficiently.
+collecting evidence. The application initially exposes only incident metadata
+and event tools. Use that context to form an initial direction. Then choose only
+diagnostics that can confirm or disprove the current hypothesis. Do not call a
+tool merely because it is available, avoid redundant or irrelevant calls, and
+stop when evidence is sufficient. Do not perform a broad baseline sweep across
+blocking, pool, connection, and deployment diagnostics. Each specialized tool
+must be motivated by a symptom or event already observed. Historical changes are
+not causes unless their timing and technical evidence connect them to this
+incident. Do not query another subsystem solely to rule it out: blocking
+diagnostics require an observed lock/wait/blocked-query signal; deployment
+diagnostics require a deployment/version/schema-change signal; pool diagnostics
+require a pool-wait/timeout/connection-pressure signal. Make additional calls
+only when the evidence justifies them. When application-pool exhaustion becomes
+the working hypothesis, inspect PostgreSQL connection capacity before finalizing
+so the report can distinguish a local pool bottleneck from server-wide
+connection exhaustion.
 Distinguish observed facts from hypotheses and
 consider alternatives. Citation fields are selectors: copy only exact `evidence_id`
 values from tool results into every `evidence_id`/`evidence_ids` field. Never put
