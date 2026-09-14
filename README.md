@@ -2,9 +2,9 @@
 
 A production-style portfolio system for evidence-based investigation of application and PostgreSQL incidents. The finished system will gather logs, run restricted database diagnostics, inspect deployments, consult runbooks, construct a timeline, and produce a supported root-cause assessment. Any future corrective action will require explicit human approval.
 
-Phase 3 adds restricted diagnostic tools, deterministic runbook retrieval, and a normalized evidence API on top of the controlled incident lab. It still contains **no** AI investigator, LLM integration, automated root-cause analysis, or remediation.
+Phase 4 adds a bounded AI incident investigator. The model chooses among the existing restricted tools, reviews returned evidence, and produces a strictly validated, persisted report. Recommendations remain advisory: there is no remediation execution path.
 
-## Phase 3 architecture
+## Phase 4 architecture
 
 ```text
 Demo incident --> Application + PostgreSQL --> Technical evidence
@@ -23,9 +23,52 @@ Demo incident --> Application + PostgreSQL --> Technical evidence
                                                    |
                                                    v
                                          Structured evidence API
-
-Future: Structured evidence --> AI investigator
+                                                   |
+                                                   v
+                                      Bounded AI investigator
+                                                   |
+                                                   v
+                                      Validated persisted report
 ```
+
+```text
+Controlled incident --> restricted tools <--> AI investigator
+                                            |
+                                            v
+                              evidence-backed validated report
+                                            |
+                                            v
+                               recommendations only; no action
+
+Future: recommendation --> human approval --> controlled remediation
+```
+
+## Agentic investigation workflow
+
+The application sends only an incident identifier and eight strict function-tool
+definitions to the OpenAI Responses API. The model selects diagnostics, receives
+each bounded result as explicitly untrusted evidence data, and may request more
+tools. Application code rejects unknown tools and arguments and never exposes a
+SQL, filesystem, shell, or remediation capability.
+
+The explicit loop allows at most six model calls and ten total tool calls. Each
+provider call has a 45-second timeout and a 3,000-token output ceiling. Those
+defaults are configurable through backend environment variables. Budget
+exhaustion terminates safely. The safe activity trace records only tool name,
+timestamp, status, and result count; prompts, evidence contents, provider bodies,
+and hidden reasoning are not logged or persisted.
+
+Final reports separate observed evidence from AI interpretation. They contain an
+executive summary, cited timeline, qualitative primary hypothesis, alternatives,
+key evidence, recommendations with approval flags, uncertainties, and runbook
+references. The application attaches the exact evidence snapshot and rejects any
+unknown evidence or runbook citation. AI conclusions are stored in the separate
+`investigations` table, never in raw incident/evidence records.
+
+Retrieved logs and runbooks are treated as untrusted data. Provider instructions
+explicitly require ignoring embedded instructions, and tool output carries a data
+boundary marker. Even a successful prompt injection cannot create a capability:
+the registry recognizes only fixed, argument-free diagnostic functions.
 
 Docker Compose runs the API and PostgreSQL on a private network. The API uses the Compose service name `db`, not container-local `localhost`. PostgreSQL health gates API startup, and the application applies the small idempotent schema at startup so existing development volumes receive schema updates safely.
 
@@ -119,6 +162,9 @@ escalation conditions. They do not contain incident-specific conclusions.
 | `POST` | `/demo/incidents/bad-deployment` | Activate `v2-bad` |
 | `GET` | `/demo/incidents/{incident_id}` | Read incident state and timeline |
 | `GET` | `/demo/incidents/{incident_id}/evidence` | Collect bounded, sanitized source evidence |
+| `POST` | `/demo/incidents/{incident_id}/investigate` | Run a bounded AI investigation |
+| `GET` | `/demo/investigations/{investigation_id}` | Retrieve a persisted investigation |
+| `GET` | `/demo/incidents/{incident_id}/investigations` | List up to 20 incident investigations |
 | `POST` | `/demo/incidents/{incident_id}/recover` | Request bounded recovery |
 | `GET` | `/demo/workload` | Exercise the active release and pool |
 | `GET` | `/demo/deployments` | Read deployment history |
@@ -153,6 +199,12 @@ Copy `.env.example` to `.env` for local overrides. The example contains developm
 | `LOG_PATH` | Application-controlled JSONL path | `logs/application.jsonl` |
 | `LOG_MAX_BYTES` | Rotating JSONL file size | `1000000` |
 | `LOG_BACKUP_COUNT` | Retained JSONL backups | `2` |
+| `OPENAI_API_KEY` | OpenAI credential; backend runtime only | none |
+| `OPENAI_MODEL` | Responses API model | `gpt-5.6-luna` |
+| `INVESTIGATION_MAX_ITERATIONS` | Model-call ceiling | `6` |
+| `INVESTIGATION_MAX_TOOL_CALLS` | Diagnostic-call ceiling | `10` |
+| `INVESTIGATION_TIMEOUT_SECONDS` | Per-provider-call timeout | `45` |
+| `INVESTIGATION_MAX_OUTPUT_TOKENS` | Per-call output ceiling | `3000` |
 | `API_PORT` | Optional host-side Compose port | `8000` |
 
 Use real secret management and a strong runtime password outside this local lab.
@@ -217,10 +269,23 @@ ruff format --check .
 
 The automated suite uses dependency replacement and in-memory fakes; it does not require Docker or arbitrary sleep timing. It covers fixed diagnostic queries, bounds, pool/server distinction, log redaction, runbook allowlisting, evidence collection, and the evidence API. Real PostgreSQL behavior is verified separately through the Compose lab by collecting evidence while each incident is active.
 
+Offline tests never call OpenAI. Optional live evaluations require the ignored
+`.env` to contain `OPENAI_API_KEY`, a running Compose stack, and available API
+credits:
+
+```bash
+python scripts/live_evaluations.py
+```
+
+The deterministic evaluator checks scenario-specific conclusions, citation
+membership, report structure, tool/iteration budgets, and absence of executed
+remediation claims.
+
 ## Current limitations
 
 - Incident coordination is process-local and intended for one Uvicorn worker.
 - The lab has no authentication or public rate limiting yet.
 - Logs are local rotating JSONL plus stdout, not a centralized log platform.
 - Schema changes use one idempotent SQL file; a migration framework is not justified yet.
-- No AI investigator or remediation capability exists in Phase 3.
+- Investigation coordination remains synchronous and process-local.
+- No remediation or human-approval execution capability exists in Phase 4.

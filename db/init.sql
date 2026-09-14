@@ -56,3 +56,18 @@ ON CONFLICT (singleton) DO NOTHING;
 INSERT INTO deployments (deployment_id, version, deployed_at, status, became_active)
 SELECT '00000000-0000-0000-0000-000000000001', 'v1', now(), 'healthy', true
 WHERE NOT EXISTS (SELECT 1 FROM deployments WHERE version = 'v1');
+
+CREATE TABLE IF NOT EXISTS investigations (
+    investigation_id uuid PRIMARY KEY,
+    incident_id uuid NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    status text NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    started_at timestamptz NOT NULL,
+    completed_at timestamptz,
+    model text NOT NULL,
+    report jsonb,
+    tool_trace jsonb NOT NULL DEFAULT '[]'::jsonb,
+    error_type text
+);
+
+CREATE INDEX IF NOT EXISTS investigations_incident_started_idx
+ON investigations (incident_id, started_at DESC);

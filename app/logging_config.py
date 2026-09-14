@@ -24,6 +24,16 @@ class JsonFormatter(logging.Formatter):
             "path",
             "deployment_version",
             "error_type",
+            "investigation_id",
+            "tool",
+            "result_count",
+            "duration_ms",
+            "model_calls",
+            "tool_calls",
+            "provider_error_code",
+            "provider_error_param",
+            "validation_error_code",
+            "record_ids",
         ):
             value = getattr(record, field, None)
             if value is not None:

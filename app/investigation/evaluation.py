@@ -1,0 +1,70 @@
+from dataclasses import dataclass
+
+from app.evidence import EvidenceItem, EvidenceType
+from app.investigation.models import InvestigationReport
+from app.models import ScenarioType
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    passed: bool
+    checks: dict[str, bool]
+
+
+def evaluate_report(
+    scenario: ScenarioType,
+    report: InvestigationReport,
+    evidence: dict[str, EvidenceItem],
+    maximum_iterations: int,
+    maximum_tool_calls: int,
+) -> EvaluationResult:
+    cited = report.cited_evidence_ids()
+    cited_types = {evidence[item].evidence_type for item in cited if item in evidence}
+    conclusion = (
+        f"{report.primary_hypothesis.cause} {report.primary_hypothesis.explanation}"
+    ).lower()
+    checks = {
+        "citations_exist": cited.issubset(evidence),
+        "tool_budget": report.metrics.tool_calls <= maximum_tool_calls,
+        "iteration_budget": report.metrics.model_calls <= maximum_iterations,
+        "no_executed_remediation": all(
+            " executed " not in f" {action.action.lower()} "
+            for action in report.recommended_actions
+        ),
+    }
+    if scenario is ScenarioType.BLOCKED_QUERY:
+        checks.update(
+            {
+                "identifies_blocking": "block" in conclusion or "lock" in conclusion,
+                "cites_blocking": EvidenceType.BLOCKED_SESSION in cited_types,
+            }
+        )
+    elif scenario is ScenarioType.CONNECTION_EXHAUSTION:
+        checks.update(
+            {
+                "identifies_pool": "pool" in conclusion,
+                "cites_pool": EvidenceType.POOL_STATE in cited_types,
+                "cites_server_capacity": (
+                    EvidenceType.CONNECTION_UTILIZATION in cited_types
+                ),
+                "does_not_claim_server_exhaustion": not (
+                    "postgresql" in conclusion
+                    and "max_connections reached" in conclusion
+                ),
+            }
+        )
+    elif scenario is ScenarioType.BAD_DEPLOYMENT:
+        checks.update(
+            {
+                "identifies_bad_version": "v2-bad" in conclusion,
+                "identifies_schema_error": (
+                    "undefinedcolumn" in conclusion
+                    or "undefined column" in conclusion
+                    or "schema" in conclusion
+                ),
+                "cites_deployment": EvidenceType.DEPLOYMENT_CHANGE in cited_types,
+                "cites_application_error": EvidenceType.APPLICATION_ERROR
+                in cited_types,
+            }
+        )
+    return EvaluationResult(passed=all(checks.values()), checks=checks)

@@ -10,6 +10,20 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.database import DatabaseCheck, database, get_database_check
 from app.evidence import EvidenceBundle
+from app.investigation.models import InvestigationRecord, InvestigationReport
+from app.investigation.provider import (
+    InvestigationConfigurationError,
+    InvestigationProviderError,
+    OpenAIInvestigationProvider,
+)
+from app.investigation.registry import InvestigationToolRegistry
+from app.investigation.service import (
+    DiagnosticToolFailure,
+    IncidentInvestigator,
+    InvalidInvestigationReport,
+    InvestigationBudgetExceeded,
+)
+from app.investigation.store import InvestigationStore
 from app.lab import (
     ActiveIncidentError,
     IncidentLab,
@@ -53,6 +67,30 @@ evidence_collector = IncidentEvidenceCollector(
     runbooks=RunbookDiagnosticTool(),
     maximum_items=settings.evidence_result_limit,
 )
+investigation_store = InvestigationStore(database)
+
+
+def build_tool_registry(incident_id: UUID) -> InvestigationToolRegistry:
+    return InvestigationToolRegistry(
+        incident_id=incident_id,
+        metadata=IncidentMetadataTool(incident_lab.store),
+        events=IncidentEventTool(incident_lab.store, settings.diagnostic_result_limit),
+        postgresql=PostgreSQLDiagnosticTool(database, settings.diagnostic_result_limit),
+        pool=ApplicationPoolDiagnosticTool(database, settings),
+        deployments=DeploymentDiagnosticTool(
+            incident_lab.store, settings.diagnostic_result_limit
+        ),
+        logs=ApplicationLogDiagnosticTool(settings),
+        runbooks=RunbookDiagnosticTool(),
+    )
+
+
+investigator = IncidentInvestigator(
+    settings=settings,
+    provider=OpenAIInvestigationProvider(settings),
+    registry_factory=build_tool_registry,
+    store=investigation_store,
+)
 
 
 class HealthResponse(BaseModel):
@@ -85,6 +123,14 @@ def get_incident_lab() -> IncidentLab:
 
 def get_evidence_collector() -> IncidentEvidenceCollector:
     return evidence_collector
+
+
+def get_investigator() -> IncidentInvestigator:
+    return investigator
+
+
+def get_investigation_store() -> InvestigationStore:
+    return investigation_store
 
 
 @app.middleware("http")
@@ -210,6 +256,67 @@ async def get_incident_evidence(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found"
         ) from exc
+
+
+@app.post(
+    "/demo/incidents/{incident_id}/investigate",
+    response_model=InvestigationReport,
+)
+async def investigate_incident(
+    incident_id: UUID,
+    service: Annotated[IncidentInvestigator, Depends(get_investigator)],
+) -> InvestigationReport:
+    try:
+        return await service.investigate(incident_id)
+    except IncidentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Incident not found") from exc
+    except InvestigationConfigurationError as exc:
+        raise HTTPException(
+            status_code=503, detail="AI investigation is not configured"
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="AI investigation timed out"
+        ) from exc
+    except (
+        InvestigationProviderError,
+        InvestigationBudgetExceeded,
+        InvalidInvestigationReport,
+        DiagnosticToolFailure,
+    ) as exc:
+        raise HTTPException(
+            status_code=502, detail="Investigation failed safely"
+        ) from exc
+
+
+@app.get(
+    "/demo/investigations/{investigation_id}",
+    response_model=InvestigationRecord,
+)
+async def get_investigation(
+    investigation_id: UUID,
+    store: Annotated[InvestigationStore, Depends(get_investigation_store)],
+) -> InvestigationRecord:
+    record = await store.get(investigation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+    return record
+
+
+@app.get(
+    "/demo/incidents/{incident_id}/investigations",
+    response_model=list[InvestigationRecord],
+)
+async def list_incident_investigations(
+    incident_id: UUID,
+    lab: Annotated[IncidentLab, Depends(get_incident_lab)],
+    store: Annotated[InvestigationStore, Depends(get_investigation_store)],
+) -> list[InvestigationRecord]:
+    try:
+        await lab.get_incident(incident_id)
+    except IncidentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Incident not found") from exc
+    return await store.list_for_incident(incident_id)
 
 
 @app.post("/demo/incidents/{incident_id}/recover", response_model=IncidentDetail)

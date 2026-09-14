@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     log_path: str = "logs/application.jsonl"
     log_max_bytes: int = 1_000_000
     log_backup_count: int = 2
+    openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-5.6-luna"
+    investigation_max_iterations: int = 6
+    investigation_max_tool_calls: int = 10
+    investigation_timeout_seconds: float = 45.0
+    investigation_max_output_tokens: int = 3000
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -42,6 +48,12 @@ class Settings(BaseSettings):
             "password": self.postgres_password.get_secret_value(),
             "connect_timeout": self.database_connect_timeout_seconds,
         }
+
+    @property
+    def has_openai_key(self) -> bool:
+        return bool(
+            self.openai_api_key and self.openai_api_key.get_secret_value().strip()
+        )
 
 
 @lru_cache
