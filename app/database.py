@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -44,13 +43,6 @@ class Database:
             yield connection
         finally:
             await connection.close()
-
-    async def initialize_schema(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "db" / "init.sql"
-        async with self.control_connection(autocommit=True) as connection:
-            await connection.execute(
-                schema_path.read_text(encoding="utf-8"), prepare=False
-            )
 
     async def recover_stale_state(self) -> None:
         async with self.control_connection() as connection:

@@ -36,6 +36,9 @@ class JsonFormatter(logging.Formatter):
             "record_ids",
             "proposal_id",
             "action_type",
+            "request_id",
+            "session_id",
+            "status",
         ):
             value = getattr(record, field, None)
             if value is not None:

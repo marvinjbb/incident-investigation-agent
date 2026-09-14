@@ -1,0 +1,36 @@
+services:
+  db:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+
+  migrate:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+
+  api:
+    environment:
+      ENVIRONMENT: production
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?required}
+      CORS_ALLOWED_ORIGINS: https://marvinjb.dev
+      TRUSTED_HOSTS: api.marvinjb.dev
+      EXPOSE_INTERNAL_ROUTES: "false"
+      UVICORN_WORKERS: "1"
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - ${TRUSTED_PROXY_IPS:?required}

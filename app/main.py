@@ -1,11 +1,14 @@
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import get_settings
 from app.database import DatabaseCheck, database, get_database_check
@@ -23,7 +26,7 @@ from app.investigation.service import (
     InvalidInvestigationReport,
     InvestigationBudgetExceeded,
 )
-from app.investigation.store import InvestigationStore
+from app.investigation.store import InvestigationAlreadyRunningError, InvestigationStore
 from app.lab import (
     ActiveIncidentError,
     IncidentLab,
@@ -41,6 +44,17 @@ from app.models import (
     ScenarioType,
     WorkloadResponse,
 )
+from app.public.models import (
+    PublicActivity,
+    PublicErrorCode,
+    PublicEvidence,
+    PublicIncident,
+    PublicIncidentRequest,
+    PublicInvestigation,
+    PublicInvestigationReport,
+    PublicRemediation,
+)
+from app.public.store import DemoSessionExpiredError, PublicRateLimitError, PublicStore
 from app.remediation.models import RemediationProposal
 from app.remediation.service import (
     ProposalExpiredError,
@@ -79,6 +93,7 @@ evidence_collector = IncidentEvidenceCollector(
 )
 investigation_store = InvestigationStore(database)
 remediation_store = RemediationStore(database)
+public_store = PublicStore(database, settings.demo_session_ttl_seconds)
 
 
 def build_tool_registry(incident_id: UUID) -> InvestigationToolRegistry:
@@ -123,8 +138,8 @@ class DatabaseHealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await database.open()
-    await database.initialize_schema()
     await database.recover_stale_state()
+    await public_store.cleanup()
     try:
         yield
     finally:
@@ -132,7 +147,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await database.close()
 
 
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app = FastAPI(
+    title=settings.app_name,
+    lifespan=lifespan,
+    docs_url=None if settings.environment == "production" else "/docs",
+    redoc_url=None if settings.environment == "production" else "/redoc",
+    openapi_url=None if settings.environment == "production" else "/openapi.json",
+)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Request-ID"],
+)
 
 
 def get_incident_lab() -> IncidentLab:
@@ -157,18 +186,54 @@ def get_remediation_service() -> RemediationService:
 
 @app.middleware("http")
 async def log_request(request: Request, call_next) -> Response:
+    supplied_request_id = request.headers.get("x-request-id")
+    try:
+        request_id = (
+            str(UUID(supplied_request_id)) if supplied_request_id else str(uuid4())
+        )
+    except ValueError:
+        request_id = str(uuid4())
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    if (
+        settings.environment == "production"
+        and not settings.expose_internal_routes
+        and request.url.path.startswith("/demo/")
+    ):
+        response = Response(status_code=404)
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
     response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    if settings.environment == "production":
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
     log_event(
         logger,
         "request_completed",
         "HTTP request completed",
         path=request.url.path,
+        request_id=request_id,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        status=response.status_code,
     )
     return response
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    return HealthResponse(status="ok")
+
+
+@app.get("/health/live", response_model=HealthResponse)
+async def liveness() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
@@ -191,6 +256,13 @@ async def database_health(
             detail="Database is unavailable",
         ) from exc
     return DatabaseHealthResponse(status="ok", database="reachable")
+
+
+@app.get("/health/ready", response_model=DatabaseHealthResponse)
+async def readiness(
+    database_check: Annotated[DatabaseCheck, Depends(get_database_check)],
+) -> DatabaseHealthResponse:
+    return await database_health(database_check)
 
 
 async def start_incident(
@@ -299,6 +371,10 @@ async def investigate_incident(
     except TimeoutError as exc:
         raise HTTPException(
             status_code=504, detail="AI investigation timed out"
+        ) from exc
+    except InvestigationAlreadyRunningError as exc:
+        raise HTTPException(
+            status_code=409, detail="An investigation is already running"
         ) from exc
     except (
         InvestigationProviderError,
@@ -473,3 +549,412 @@ async def pool_state(
     lab: Annotated[IncidentLab, Depends(get_incident_lab)],
 ) -> PoolState:
     return lab.pool_state()
+
+
+SESSION_COOKIE = "incident_demo_session"
+PUBLIC_EVENT_LABELS = {
+    "incident_started": "Incident created",
+    "lock_acquired": "Database lock detected",
+    "query_blocked": "Blocked query confirmed",
+    "pool_saturated": "Application connection pool saturated",
+    "request_failed": "Application failure observed",
+    "deployment_activated": "Deployment change observed",
+    "incident_recovered": "Incident resolved",
+    "remediation_rollback_requested": "Rollback requested",
+}
+PUBLIC_REMEDIATION_LABELS = {
+    "remediation_proposal_created": "Remediation proposed",
+    "remediation_approved": "Human approved remediation",
+    "remediation_rejected": "Human rejected remediation",
+    "remediation_execution_started": "Remediation started",
+    "remediation_execution_succeeded": "Remediation executed",
+    "remediation_verification_started": "Recovery verification started",
+    "remediation_verification_completed": "Recovery verified",
+    "remediation_completed": "Remediation completed",
+    "remediation_expired": "Remediation proposal expired",
+    "remediation_execution_failed": "Remediation failed safely",
+}
+
+
+def public_error(
+    request: Request,
+    status_code: int,
+    code: PublicErrorCode,
+    message: str,
+    *,
+    retry_after: int | None = None,
+) -> HTTPException:
+    headers = {"Retry-After": str(retry_after)} if retry_after else None
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code.value,
+            "message": message,
+            "request_id": request.state.request_id,
+        },
+        headers=headers,
+    )
+
+
+async def require_public_session(request: Request) -> UUID:
+    raw = request.cookies.get(SESSION_COOKIE)
+    try:
+        session_id = UUID(raw) if raw else None
+    except ValueError:
+        session_id = None
+    if session_id is None:
+        raise public_error(
+            request,
+            401,
+            PublicErrorCode.SESSION_EXPIRED,
+            "Demo session is missing or expired",
+        )
+    try:
+        await public_store.require_session(session_id)
+    except DemoSessionExpiredError as exc:
+        raise public_error(
+            request,
+            401,
+            PublicErrorCode.SESSION_EXPIRED,
+            "Demo session is missing or expired",
+        ) from exc
+    return session_id
+
+
+async def enforce_public_limit(
+    request: Request, session_id: UUID, action: str, limit: int
+) -> None:
+    try:
+        await public_store.consume_rate_limit(
+            str(session_id),
+            action,
+            limit,
+            settings.public_rate_limit_window_seconds,
+        )
+    except PublicRateLimitError as exc:
+        log_event(
+            logger,
+            "public_rate_limited",
+            "Public demo request rejected",
+            request_id=request.state.request_id,
+            session_id=session_id,
+            action_type=action,
+        )
+        raise public_error(
+            request,
+            429,
+            PublicErrorCode.RATE_LIMITED,
+            "Public demo rate limit exceeded",
+            retry_after=exc.retry_after,
+        ) from exc
+
+
+def public_incident_model(incident: IncidentDetail) -> PublicIncident:
+    activity = [
+        PublicActivity(
+            event=PUBLIC_EVENT_LABELS[event.event_type],
+            occurred_at=event.occurred_at,
+        )
+        for event in incident.events
+        if event.event_type in PUBLIC_EVENT_LABELS
+    ][-30:]
+    return PublicIncident(
+        **incident.model_dump(exclude={"events", "description"}),
+        activity=activity,
+    )
+
+
+def public_remediation_model(proposal: RemediationProposal) -> PublicRemediation:
+    verification = proposal.verification_result
+    return PublicRemediation(
+        proposal_id=proposal.proposal_id,
+        incident_id=proposal.incident_id,
+        action_type=proposal.action_type,
+        status=proposal.status,
+        summary=proposal.summary,
+        expires_at=proposal.expires_at,
+        verification_result=(
+            {key: bool(value) for key, value in verification.items()}
+            if verification
+            else None
+        ),
+        activity=[
+            PublicActivity(
+                event=PUBLIC_REMEDIATION_LABELS[event.event_type],
+                occurred_at=event.occurred_at,
+            )
+            for event in proposal.audit_events
+            if event.event_type in PUBLIC_REMEDIATION_LABELS
+        ],
+    )
+
+
+def public_report_model(report: InvestigationReport) -> PublicInvestigationReport:
+    cited = report.cited_evidence_ids()
+    evidence = [
+        PublicEvidence(
+            evidence_id=item.evidence_id,
+            source=item.source,
+            evidence_type=item.evidence_type,
+            timestamp=item.timestamp,
+            summary=item.summary,
+        )
+        for item in report.evidence_catalog
+        if item.evidence_id in cited
+    ]
+    return PublicInvestigationReport(
+        executive_summary=report.executive_summary,
+        timeline=report.timeline,
+        primary_hypothesis=report.primary_hypothesis,
+        alternative_hypotheses=report.alternative_hypotheses,
+        evidence=evidence,
+        recommended_actions=report.recommended_actions,
+        uncertainties=report.uncertainties,
+        activity=report.activity_trace,
+        model=report.model,
+        model_calls=report.metrics.model_calls,
+        tool_calls=report.metrics.tool_calls,
+        duration_ms=report.metrics.duration_ms,
+    )
+
+
+@app.post("/api/demo/incidents", response_model=PublicIncident, status_code=202)
+async def public_create_incident(
+    payload: PublicIncidentRequest, request: Request, response: Response
+) -> PublicIncident:
+    await public_store.cleanup()
+    try:
+        await public_store.consume_rate_limit(
+            "global",
+            "incident",
+            settings.public_incident_limit,
+            settings.public_rate_limit_window_seconds,
+        )
+    except PublicRateLimitError as exc:
+        raise public_error(
+            request,
+            429,
+            PublicErrorCode.RATE_LIMITED,
+            "The public demo is temporarily at capacity",
+            retry_after=exc.retry_after,
+        ) from exc
+    raw = request.cookies.get(SESSION_COOKIE)
+    try:
+        session_id = UUID(raw) if raw else await public_store.create_session()
+        await public_store.require_session(session_id)
+    except (ValueError, DemoSessionExpiredError):
+        session_id = await public_store.create_session()
+    try:
+        incident = await incident_lab.start(
+            payload.scenario,
+            settings.incident_default_duration_seconds,
+            session_id,
+        )
+    except ActiveIncidentError as exc:
+        raise public_error(
+            request,
+            409,
+            PublicErrorCode.CONFLICT,
+            "The demo lab is currently running another incident",
+        ) from exc
+    response.set_cookie(
+        SESSION_COOKIE,
+        str(session_id),
+        max_age=settings.demo_session_ttl_seconds,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="strict",
+        path="/api/demo",
+    )
+    return public_incident_model(await incident_lab.get_incident(incident.incident_id))
+
+
+@app.get("/api/demo/incidents/{incident_id}", response_model=PublicIncident)
+async def public_get_incident(
+    incident_id: UUID,
+    request: Request,
+    session_id: Annotated[UUID, Depends(require_public_session)],
+) -> PublicIncident:
+    if not await public_store.owns_incident(session_id, incident_id):
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Incident not found"
+        )
+    return public_incident_model(await incident_lab.get_incident(incident_id))
+
+
+@app.post(
+    "/api/demo/incidents/{incident_id}/investigate",
+    response_model=PublicInvestigation,
+)
+async def public_investigate(
+    incident_id: UUID,
+    request: Request,
+    session_id: Annotated[UUID, Depends(require_public_session)],
+) -> PublicInvestigation:
+    if not await public_store.owns_incident(session_id, incident_id):
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Incident not found"
+        )
+    await enforce_public_limit(
+        request, session_id, "investigation", settings.public_investigation_limit
+    )
+    try:
+        report = await investigator.investigate(incident_id)
+    except (
+        InvestigationConfigurationError,
+        InvestigationProviderError,
+        InvestigationBudgetExceeded,
+        InvalidInvestigationReport,
+        DiagnosticToolFailure,
+        TimeoutError,
+    ) as exc:
+        log_event(
+            logger,
+            "public_investigation_failed",
+            "Public investigation failed safely",
+            request_id=request.state.request_id,
+            session_id=session_id,
+            incident_id=incident_id,
+            error_type=type(exc).__name__,
+        )
+        raise public_error(
+            request,
+            503,
+            PublicErrorCode.TEMPORARILY_UNAVAILABLE,
+            "Investigation is temporarily unavailable",
+        ) from exc
+    except InvestigationAlreadyRunningError as exc:
+        raise public_error(
+            request,
+            409,
+            PublicErrorCode.CONFLICT,
+            "An investigation is already running",
+        ) from exc
+    return PublicInvestigation(
+        investigation_id=report.investigation_id,
+        incident_id=incident_id,
+        status="completed",
+        report=public_report_model(report),
+    )
+
+
+@app.get(
+    "/api/demo/investigations/{investigation_id}",
+    response_model=PublicInvestigation,
+)
+async def public_get_investigation(
+    investigation_id: UUID,
+    request: Request,
+    session_id: Annotated[UUID, Depends(require_public_session)],
+) -> PublicInvestigation:
+    if not await public_store.owns_investigation(session_id, investigation_id):
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Investigation not found"
+        )
+    record = await investigation_store.get(investigation_id)
+    if record is None:
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Investigation not found"
+        )
+    return PublicInvestigation(
+        investigation_id=record.investigation_id,
+        incident_id=record.incident_id,
+        status=record.status,
+        report=public_report_model(record.report) if record.report else None,
+    )
+
+
+@app.post(
+    "/api/demo/investigations/{investigation_id}/remediation",
+    response_model=PublicRemediation,
+    status_code=201,
+)
+async def public_propose_remediation(
+    investigation_id: UUID,
+    request: Request,
+    session_id: Annotated[UUID, Depends(require_public_session)],
+) -> PublicRemediation:
+    if not await public_store.owns_investigation(session_id, investigation_id):
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Investigation not found"
+        )
+    await enforce_public_limit(
+        request, session_id, "remediation", settings.public_remediation_limit
+    )
+    try:
+        proposal = await remediation_service.propose(investigation_id)
+    except (ProposalNotFoundError, ProposalPolicyError) as exc:
+        raise public_error(
+            request,
+            409,
+            PublicErrorCode.CONFLICT,
+            "Remediation proposal is unavailable",
+        ) from exc
+    return public_remediation_model(proposal)
+
+
+@app.post(
+    "/api/demo/remediations/{proposal_id}/approve",
+    response_model=PublicRemediation,
+)
+async def public_approve_remediation(
+    proposal_id: UUID,
+    request: Request,
+    session_id: Annotated[UUID, Depends(require_public_session)],
+) -> PublicRemediation:
+    if not await public_store.owns_proposal(session_id, proposal_id):
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Remediation not found"
+        )
+    await enforce_public_limit(
+        request, session_id, "remediation", settings.public_remediation_limit
+    )
+    try:
+        proposal = await remediation_service.approve(proposal_id)
+    except (ProposalExpiredError, ProposalStateError) as exc:
+        raise public_error(
+            request,
+            409,
+            PublicErrorCode.CONFLICT,
+            "Remediation cannot be approved",
+        ) from exc
+    return public_remediation_model(proposal)
+
+
+@app.post(
+    "/api/demo/remediations/{proposal_id}/execute",
+    response_model=PublicRemediation,
+)
+async def public_execute_remediation(
+    proposal_id: UUID,
+    request: Request,
+    session_id: Annotated[UUID, Depends(require_public_session)],
+) -> PublicRemediation:
+    if not await public_store.owns_proposal(session_id, proposal_id):
+        raise public_error(
+            request, 404, PublicErrorCode.NOT_FOUND, "Remediation not found"
+        )
+    await enforce_public_limit(
+        request, session_id, "remediation", settings.public_remediation_limit
+    )
+    try:
+        proposal = await remediation_service.execute(proposal_id)
+    except ProposalExpiredError as exc:
+        raise public_error(
+            request,
+            410,
+            PublicErrorCode.CONFLICT,
+            "Remediation proposal expired",
+        ) from exc
+    except (
+        ProposalPolicyError,
+        ProposalStateError,
+        RemediationExecutionError,
+    ) as exc:
+        raise public_error(
+            request,
+            409,
+            PublicErrorCode.CONFLICT,
+            "Remediation cannot proceed",
+        ) from exc
+    return public_remediation_model(proposal)

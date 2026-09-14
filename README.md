@@ -371,3 +371,87 @@ remediation claims.
 - Investigation coordination remains synchronous and process-local.
 - Remediation is limited to one active synthetic incident in one API process.
 - Approval records an explicit demo action but has no authenticated actor identity yet.
+## Phase 6: public-demo hardening
+
+The production-facing API is a deliberately small, session-scoped facade over the
+synthetic lab. It does not expose diagnostic tools, raw logs, arbitrary prompts, or
+general infrastructure administration.
+
+```text
+marvinjb.dev
+    -> /api/demo (opaque HttpOnly session cookie)
+    -> PostgreSQL ownership + rate-limit records
+    -> existing incident lab / investigator / remediation policy
+    -> curated incident, activity, report, and verification models
+```
+
+Public routes:
+
+- `POST /api/demo/incidents`
+- `GET /api/demo/incidents/{incident_id}`
+- `POST /api/demo/incidents/{incident_id}/investigate`
+- `GET /api/demo/investigations/{investigation_id}`
+- `POST /api/demo/investigations/{investigation_id}/remediation`
+- `POST /api/demo/remediations/{proposal_id}/approve`
+- `POST /api/demo/remediations/{proposal_id}/execute`
+- `GET /health/live` and `GET /health/ready`
+
+The original `/demo/*` routes are development/internal verification routes. They
+return `404` when `ENVIRONMENT=production` and `EXPOSE_INTERNAL_ROUTES=false`.
+Raw evidence and diagnostics are therefore not part of the public contract.
+
+### Sessions, limits, and cleanup
+
+Sessions are opaque, application-generated UUIDs stored in PostgreSQL and carried in
+an HttpOnly, Secure-in-production, SameSite=Strict cookie. Every public resource is
+joined back to its owning session; cross-session lookups return the same safe 404 as
+unknown resources.
+
+Default rolling-window limits (600 seconds) are database-backed and atomic:
+
+- 3 incident creations globally;
+- 2 investigations per session;
+- 6 remediation operations per session.
+
+Rate-limit rejection returns `429` with `Retry-After`. Only one synthetic incident
+can be active globally, and only one investigation can run per incident. Sessions
+expire after 30 minutes. Expired sessions and old rate events are pruned without
+allowing unbounded public history.
+
+### Coordination limitation
+
+PostgreSQL now owns public session isolation, global active-incident uniqueness,
+running-investigation uniqueness, rate limits, and remediation state transitions.
+These remain correct across concurrent requests and restarts. The synthetic
+connection-pool holder task is still owned by the process that created it, so the
+production command intentionally remains one Uvicorn worker. Multiple workers are
+not claimed as supported until that lab mechanism is redesigned or moved to a
+dedicated incident-lab coordinator. Production settings reject
+`UVICORN_WORKERS != 1`, and the production Compose command explicitly starts one
+worker so an ordinary configuration mistake cannot silently violate this boundary.
+
+### Schema migrations
+
+Alembic is now the explicit production schema mechanism. Application startup no
+longer runs schema DDL. Apply migrations before starting the API:
+
+```powershell
+.venv\Scripts\alembic.exe upgrade head
+```
+
+Docker Compose runs the one-shot `migrate` service and starts the API only after the
+migration succeeds.
+
+### Production security
+
+- Production CORS is exactly `https://marvinjb.dev`; wildcard CORS is rejected.
+- Production requires runtime OpenAI and PostgreSQL credentials and disables
+  internal routes.
+- Callers cannot select a model, prompt, tool, PID, SQL statement, or deployment.
+- Existing iteration, tool-call, output-token, and timeout bounds remain enforced.
+- The AI investigator has no remediation tools. Human approval and TOCTOU checks
+  remain mandatory before one of three fixed synthetic actions executes.
+- Request IDs, safe resource IDs, latency, status, and provider error classes are
+  logged; prompts, provider bodies, evidence contents, and credentials are not.
+
+See `docs/DEPLOYMENT.md` for reverse-proxy and production startup expectations.

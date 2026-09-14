@@ -23,6 +23,10 @@ async def test_health_returns_ok(client: AsyncClient) -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+    live = await client.get("/health/live")
+    assert live.status_code == 200
+    assert live.json() == {"status": "ok"}
+
 
 @pytest.mark.asyncio
 async def test_database_health_returns_reachable(client: AsyncClient) -> None:
@@ -35,6 +39,9 @@ async def test_database_health_returns_reachable(client: AsyncClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "database": "reachable"}
+
+    ready = await client.get("/health/ready")
+    assert ready.status_code == 200
 
 
 @pytest.mark.asyncio

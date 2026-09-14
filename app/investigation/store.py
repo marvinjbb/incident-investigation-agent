@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from app.database import Database
@@ -11,6 +12,10 @@ from app.investigation.models import (
 )
 
 
+class InvestigationAlreadyRunningError(RuntimeError):
+    pass
+
+
 class InvestigationStore:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -18,16 +23,21 @@ class InvestigationStore:
     async def start(
         self, investigation_id: UUID, incident_id: UUID, model: str
     ) -> None:
-        async with self._database.control_connection() as connection:
-            await connection.execute(
-                """
-                INSERT INTO investigations
-                    (investigation_id, incident_id, status, started_at, model)
-                VALUES (%s, %s, 'running', %s, %s)
-                """,
-                (investigation_id, incident_id, datetime.now(UTC), model),
-            )
-            await connection.commit()
+        try:
+            async with self._database.control_connection() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO investigations
+                        (investigation_id, incident_id, status, started_at, model)
+                    VALUES (%s, %s, 'running', %s, %s)
+                    """,
+                    (investigation_id, incident_id, datetime.now(UTC), model),
+                )
+                await connection.commit()
+        except UniqueViolation as exc:
+            raise InvestigationAlreadyRunningError(
+                "An investigation is already running for this incident"
+            ) from exc
 
     async def complete(
         self, investigation_id: UUID, report: InvestigationReport

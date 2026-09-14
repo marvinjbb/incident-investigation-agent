@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from app.database import Database
@@ -19,15 +20,19 @@ class IncidentStore:
         self.database = database
 
     async def create_incident(
-        self, incident_id: UUID, scenario: ScenarioType, description: str
+        self,
+        incident_id: UUID,
+        scenario: ScenarioType,
+        description: str,
+        session_id: UUID | None = None,
     ) -> Incident:
         started_at = datetime.now(UTC)
         async with self.database.control_connection() as connection:
             await connection.execute(
                 """
                 INSERT INTO incidents
-                    (incident_id, scenario, status, started_at, description)
-                VALUES (%s, %s, %s, %s, %s)
+                    (incident_id, scenario, status, started_at, description, session_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
                     incident_id,
@@ -35,6 +40,7 @@ class IncidentStore:
                     IncidentStatus.STARTING.value,
                     started_at,
                     description,
+                    session_id,
                 ),
             )
             await connection.execute(
@@ -57,6 +63,22 @@ class IncidentStore:
             started_at=started_at,
             description=description,
         )
+
+    async def create_incident_atomic(
+        self,
+        incident_id: UUID,
+        scenario: ScenarioType,
+        description: str,
+        session_id: UUID,
+    ) -> Incident:
+        try:
+            return await self.create_incident(
+                incident_id, scenario, description, session_id
+            )
+        except UniqueViolation as exc:
+            from app.lab import ActiveIncidentError
+
+            raise ActiveIncidentError("A demo incident is already active") from exc
 
     async def update_status(self, incident_id: UUID, status: IncidentStatus) -> None:
         ended_at = (

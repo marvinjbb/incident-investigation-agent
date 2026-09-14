@@ -43,7 +43,11 @@ class RemediationPreconditionError(RuntimeError):
 
 class Store(Protocol):
     async def create_incident(
-        self, incident_id: UUID, scenario: ScenarioType, description: str
+        self,
+        incident_id: UUID,
+        scenario: ScenarioType,
+        description: str,
+        session_id: UUID | None = None,
     ) -> Incident: ...
 
     async def update_status(
@@ -107,14 +111,27 @@ class IncidentLab:
             ScenarioType.BAD_DEPLOYMENT: self._run_bad_deployment,
         }
 
-    async def start(self, scenario: ScenarioType, duration_seconds: int) -> Incident:
+    async def start(
+        self,
+        scenario: ScenarioType,
+        duration_seconds: int,
+        session_id: UUID | None = None,
+    ) -> Incident:
         async with self._lock:
             if self._active_id is not None:
                 raise ActiveIncidentError("A demo incident is already active")
             incident_id = uuid4()
-            incident = await self.store.create_incident(
-                incident_id, scenario, SCENARIO_DESCRIPTIONS[scenario]
-            )
+            if session_id is not None and hasattr(self.store, "create_incident_atomic"):
+                incident = await self.store.create_incident_atomic(
+                    incident_id,
+                    scenario,
+                    SCENARIO_DESCRIPTIONS[scenario],
+                    session_id,
+                )
+            else:
+                incident = await self.store.create_incident(
+                    incident_id, scenario, SCENARIO_DESCRIPTIONS[scenario]
+                )
             await self.store.add_event(
                 incident_id,
                 "incident_started",

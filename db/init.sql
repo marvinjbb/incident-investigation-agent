@@ -110,3 +110,26 @@ CREATE TABLE IF NOT EXISTS remediation_audit_events (
 
 CREATE INDEX IF NOT EXISTS remediation_audit_proposal_time_idx
 ON remediation_audit_events (proposal_id, occurred_at, audit_event_id);
+
+CREATE TABLE IF NOT EXISTS demo_sessions (
+    session_id uuid PRIMARY KEY,
+    created_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    last_seen_at timestamptz NOT NULL
+);
+
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS session_id uuid REFERENCES demo_sessions(session_id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS incidents_session_started_idx ON incidents (session_id, started_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_demo_incident_idx
+ON incidents ((true)) WHERE status IN ('starting', 'active', 'recovering');
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_investigation_per_incident_idx
+ON investigations (incident_id) WHERE status = 'running';
+
+CREATE TABLE IF NOT EXISTS public_rate_limit_events (
+    rate_event_id bigserial PRIMARY KEY,
+    rate_key text NOT NULL,
+    action text NOT NULL CHECK (action IN ('incident', 'investigation', 'remediation')),
+    occurred_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS public_rate_limit_lookup_idx
+ON public_rate_limit_events (rate_key, action, occurred_at DESC);
