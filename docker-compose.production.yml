@@ -12,8 +12,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
 
   api:
+    ports: !override
+      - "127.0.0.1:${API_PORT:-8002}:8000"
     environment:
       ENVIRONMENT: production
+      INCIDENT_DEFAULT_DURATION_SECONDS: "120"
+      INCIDENT_MAX_DURATION_SECONDS: "120"
       POSTGRES_DB: ${POSTGRES_DB:?required}
       POSTGRES_USER: ${POSTGRES_USER:?required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}

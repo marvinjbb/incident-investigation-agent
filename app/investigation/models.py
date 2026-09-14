@@ -89,7 +89,13 @@ class ReportDraft(StrictModel):
     key_evidence: list[KeyEvidence] = Field(min_length=1, max_length=15)
     recommended_actions: list[RecommendedAction] = Field(max_length=10)
     uncertainties: list[str] = Field(max_length=10)
-    runbook_references: list[str] = Field(max_length=3)
+    runbook_references: list[str] = Field(
+        max_length=3,
+        description=(
+            "Exact reference field values from retrieved runbook evidence, not "
+            "evidence IDs, titles, or invented paths. Empty if no runbook is cited."
+        ),
+    )
 
     def cited_evidence_ids(self) -> set[str]:
         cited = set(self.executive_summary_evidence_ids)

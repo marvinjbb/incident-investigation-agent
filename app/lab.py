@@ -417,6 +417,14 @@ class IncidentLab:
             },
         )
         try:
+            await self.workload("/demo/workload")
+        except WorkloadUnavailableError:
+            # The fixed demo workload records the genuine database error through
+            # the normal incident-event and structured-logging paths.
+            pass
+        else:
+            raise RuntimeError("Bad deployment did not reproduce its workload failure")
+        try:
             await self._wait(stop_event, duration_seconds)
         finally:
             recovery = await self.store.activate_deployment("v1", "healthy")

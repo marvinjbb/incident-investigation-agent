@@ -1,8 +1,11 @@
 import asyncio
+import logging
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from psycopg import errors
 
 from app.config import Settings
 from app.lab import ActiveIncidentError, IncidentLab, RemediationPreconditionError
@@ -19,6 +22,22 @@ from app.models import (
 class FakeDatabase:
     def pool_state(self) -> dict[str, int]:
         return {"size": 3, "available": 2, "waiting": 0, "maximum": 3}
+
+
+class FailingWorkloadConnection:
+    async def execute(self, _: str):
+        raise errors.UndefinedColumn('column "removed_message" does not exist')
+
+
+class FailingWorkloadPool:
+    @asynccontextmanager
+    async def connection(self):
+        yield FailingWorkloadConnection()
+
+
+class FailingWorkloadDatabase(FakeDatabase):
+    def __init__(self) -> None:
+        self.pool = FailingWorkloadPool()
 
 
 class FakeStore:
@@ -92,6 +111,45 @@ class FakeStore:
         return []
 
 
+class BadDeploymentStore(FakeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_deployment = "v1"
+        self.deployments: list[Deployment] = []
+        self.failure_observed = asyncio.Event()
+
+    async def add_event(
+        self,
+        incident_id: UUID,
+        event_type: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        await super().add_event(incident_id, event_type, details)
+        if event_type == "request_failed":
+            self.failure_observed.set()
+
+    async def activate_deployment(
+        self, version: str, status: str, became_active: bool = True
+    ) -> Deployment:
+        deployment = Deployment(
+            deployment_id=uuid4(),
+            version=version,
+            deployed_at=datetime.now(UTC),
+            status=status,
+            became_active=became_active,
+        )
+        self.deployments.append(deployment)
+        if became_active:
+            self.active_deployment = version
+        return deployment
+
+    async def active_version(self) -> str:
+        return self.active_deployment
+
+    async def list_deployments(self) -> list[Deployment]:
+        return list(reversed(self.deployments))
+
+
 @pytest.mark.asyncio
 async def test_incident_transitions_and_manual_recovery() -> None:
     store = FakeStore()
@@ -144,6 +202,45 @@ async def test_incident_auto_cleans_up_when_handler_finishes() -> None:
 
     assert detail.status is IncidentStatus.RESOLVED
     assert detail.events[-1].event_type == "incident_recovered"
+
+
+@pytest.mark.asyncio
+async def test_bad_deployment_exercises_fixed_workload_and_records_real_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = BadDeploymentStore()
+    lab = IncidentLab(
+        FailingWorkloadDatabase(),  # type: ignore[arg-type]
+        store,
+        Settings(),
+    )
+    caplog.set_level(logging.INFO, logger="app.lab")
+
+    incident = await lab.start(ScenarioType.BAD_DEPLOYMENT, 10)
+    await asyncio.wait_for(store.failure_observed.wait(), timeout=1)
+    detail = await lab.get_incident(incident.incident_id)
+
+    failed_events = [
+        event for event in detail.events if event.event_type == "request_failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0].details == {
+        "path": "/demo/workload",
+        "deployment_version": "v2-bad",
+        "error_type": "UndefinedColumn",
+    }
+    error_logs = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_type", None) == "application_error"
+    ]
+    assert len(error_logs) == 1
+    assert error_logs[0].incident_id == incident.incident_id
+    assert error_logs[0].error_type == "UndefinedColumn"
+
+    recovered = await lab.recover(incident.incident_id)
+    assert recovered.status is IncidentStatus.RESOLVED
+    assert store.active_deployment == "v1"
 
 
 def test_pool_state_is_bounded_and_structured() -> None:

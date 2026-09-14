@@ -24,12 +24,33 @@ Recommended proxy bounds:
 ## Startup
 
 Provide all secrets through the runtime environment. Do not copy `.env` into an
-image. Validate configuration before rollout, then run:
+image. The verified VPS layout is:
+
+- releases: `/opt/incident-investigation-agent/releases/<release-id>`;
+- active release pointer: `/opt/incident-investigation-agent/current`;
+- runtime environment: `/etc/incident-investigation-agent/environment`, owned by
+  `root:root` with mode `0600`;
+- Compose project and private network: `incident-agent` and
+  `incident-agent_default`;
+- API binding: `127.0.0.1:8002` to container port `8000`;
+- PostgreSQL: private container port only, with no host binding;
+- persistent volumes: `incident-agent_incident-postgres-data` and
+  `incident-agent_incident-application-logs`.
+
+Transfer a clean release archive and a separately staged root-only runtime
+environment file. The archive must exclude `.git`, `.env`, `.venv`, caches, logs,
+test artifacts, and credentials. Run the checked-in deployment helper on the VPS:
 
 ```text
-docker compose -f docker-compose.yml -f docker-compose.production.yml run --rm migrate
-docker compose -f docker-compose.yml -f docker-compose.production.yml up -d api
+scripts/deploy-production.sh RELEASE_ID ARCHIVE_PATH ENVIRONMENT_PATH
 ```
+
+The helper validates both staged files and the release identifier, installs the
+runtime environment as `0600`, validates Compose, builds the release, starts and
+health-checks PostgreSQL, runs `alembic upgrade head`, and stops if migration
+fails. It then starts only the Incident Agent API, performs Host-aware loopback
+health checks, and advances `current` only after readiness succeeds. Never remove
+the PostgreSQL or application-log volumes during a normal release or rollback.
 
 The production overlay deliberately fails interpolation when database credentials,
 the OpenAI key, or `TRUSTED_PROXY_IPS` are absent. The API is a non-root container
@@ -43,7 +64,13 @@ workers. Do not replace the real pool exhaustion with a fake shared counter.
 
 Use `/health/live` for process liveness. Use `/health/ready` for readiness and
 traffic admission because it verifies PostgreSQL. OpenAI availability does not make
-liveness fail.
+liveness fail. Production loopback checks must send `Host: api.marvinjb.dev` because
+the same TrustedHostMiddleware policy applies on `127.0.0.1:8002`; an omitted host
+header correctly returns HTTP 400 and must not be interpreted as a startup failure.
+
+The production demo uses the bounded 120-second incident lifetime and retains
+automatic recovery. This allows an investigation to finish before the proposal,
+approval, and execution steps while ensuring abandoned synthetic incidents recover.
 
 ## Route exposure
 
@@ -52,4 +79,32 @@ Nginx should deny `/demo/*`, `/docs`, `/redoc`, and `/openapi.json` in productio
 defense in depth. The application independently returns 404 for `/demo/*` when the
 production environment disables internal routes.
 
-No remote infrastructure is created or modified by this repository.
+The verified Nginx configuration adds only these Incident Agent route groups to the
+existing `api.marvinjb.dev` server: `/api/demo/`, `/health/live`, and
+`/health/ready`. They proxy to `127.0.0.1:8002`. Validate with `nginx -t` before
+every reload. Do not modify the existing Extraction Agent or Research Agent
+upstreams, routes, containers, ports, or data.
+
+## Verified production checks
+
+The Phase 7 deployment was verified through public HTTPS with all three controlled
+scenarios:
+
+- blocked query: PostgreSQL exposed the exact controlled blocker relationship;
+  explicit approval executed only `terminate_demo_blocker`;
+- connection-pool exhaustion: application pool saturation was distinguished from
+  PostgreSQL server capacity; explicit approval executed only
+  `release_demo_pool_pressure`;
+- bad deployment: activating `v2-bad` exercised the fixed demo workload once and
+  produced a genuine `UndefinedColumn` application error; explicit approval
+  executed only `rollback_demo_deployment` and restored healthy `v1`.
+
+Every report used exact application-owned evidence IDs and exact retrieved runbook
+references. Each proposal remained session-owned, pending explicit approval, and
+subject to expiration and execution-time precondition checks. Restart verification
+preserved database state and left both existing agent deployments unchanged.
+
+For rollback, retain prior immutable release directories and images. Repoint and
+restart only the Incident Agent API after validating the previous release against
+the current database schema. Do not reverse an Alembic migration automatically and
+never delete persistent volumes as part of rollback.

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -47,3 +49,11 @@ def test_production_rejects_multiple_uvicorn_workers() -> None:
             uvicorn_workers=2,
             _env_file=None,
         )
+
+
+def test_deployment_loopback_health_checks_use_production_host() -> None:
+    script = Path("scripts/deploy-production.sh").read_text(encoding="utf-8")
+
+    assert script.count("--header 'Host: api.marvinjb.dev'") == 4
+    assert script.count("http://127.0.0.1:8002/health/live") == 2
+    assert script.count("http://127.0.0.1:8002/health/ready") == 2

@@ -220,15 +220,7 @@ class IncidentInvestigator:
                     history.append(
                         {
                             "role": "user",
-                            "content": (
-                                "The draft failed application validation with code "
-                                f"{exc.code}. Each citation field must contain only "
-                                "exact application-owned IDs beginning with `ev_`, "
-                                "never factual sentences, summaries, or paraphrases. "
-                                "Use only these exact "
-                                f"collected evidence IDs: {sorted(evidence)}. Return a "
-                                "corrected report; do not change evidence."
-                            ),
+                            "content": self._correction_message(exc, evidence),
                         }
                     )
                     continue
@@ -262,6 +254,37 @@ class IncidentInvestigator:
                 validation_error_code=getattr(exc, "code", None),
             )
             raise
+
+    @staticmethod
+    def _correction_message(
+        exc: InvalidInvestigationReport, evidence: dict[str, EvidenceItem]
+    ) -> str:
+        if exc.code == "unknown_runbook":
+            references = sorted(
+                {
+                    item.reference
+                    for item in evidence.values()
+                    if item.source is EvidenceSource.RUNBOOK
+                    and item.reference is not None
+                }
+            )
+            return (
+                "The draft failed validation at runbook_references (unknown_runbook). "
+                "This field selects exact reference values from retrieved runbooks, "
+                "not ev_ evidence IDs, titles, or invented paths. Allowed values: "
+                f"{references}. Use an empty list if none are cited. "
+                "Keep evidence citations as exact collected evidence IDs. "
+                "Return one corrected report without changing evidence."
+            )
+        return (
+            "The draft failed application validation with code "
+            f"{exc.code}. Each citation field must contain only "
+            "exact application-owned IDs beginning with `ev_`, "
+            "never factual sentences, summaries, or paraphrases. "
+            "Use only these exact "
+            f"collected evidence IDs: {sorted(evidence)}. Return a "
+            "corrected report; do not change evidence."
+        )
 
     def _finalize(
         self,

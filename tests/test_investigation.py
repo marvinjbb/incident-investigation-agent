@@ -232,6 +232,54 @@ async def test_invalid_model_prose_is_not_logged_as_a_record_id(caplog):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("corrected", [True, False])
+async def test_runbook_repair_uses_reference_values_and_remains_strict(corrected):
+    incident_id = uuid4()
+    reference = "runbook:bad-deployment.md"
+
+    class RunbookRegistry(Registry):
+        async def execute(self, name, arguments):
+            items = await super().execute(name, arguments)
+            items.append(
+                EvidenceItem(
+                    evidence_id="ev_runbook",
+                    source=EvidenceSource.RUNBOOK,
+                    evidence_type=EvidenceType.TROUBLESHOOTING_GUIDANCE,
+                    incident_id=incident_id,
+                    summary="Approved runbook",
+                    details={"content": "Private test runbook body"},
+                    reference=reference,
+                )
+            )
+            return items
+
+    invalid = draft()
+    invalid.runbook_references = ["ev_runbook"]
+    repaired = draft()
+    repaired.runbook_references = [reference if corrected else "bad-deployment.md"]
+    provider = Provider([tool_turn(), report_turn(invalid), report_turn(repaired)])
+    store = Store()
+    investigator = IncidentInvestigator(
+        Settings(), provider, lambda _: RunbookRegistry(incident_id), store
+    )
+    if corrected:
+        report = await investigator.investigate(incident_id)
+        assert report.runbook_references == [reference]
+        assert report.metrics.model_calls == 3
+        assert report.cited_evidence_ids() == {"ev_metadata"}
+    else:
+        with pytest.raises(InvalidInvestigationReport) as exc:
+            await investigator.investigate(incident_id)
+        assert exc.value.code == "unknown_runbook"
+        assert not store.completed
+        assert len(provider.histories) == 3
+    feedback = provider.histories[2][-1]["content"]
+    assert "runbook_references" in feedback
+    assert reference in feedback
+    assert "Private test runbook body" not in feedback
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool_and_invalid_arguments_are_never_executed():
     incident_id = uuid4()
     for turn in (tool_turn("delete_database"), tool_turn(arguments='{"sql":"DROP"}')):
