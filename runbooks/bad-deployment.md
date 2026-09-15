@@ -18,6 +18,9 @@
 - Application/database contract incompatibility.
 - Missing migration or incorrect deployment ordering.
 
+Do not infer causality from timing alone. Require version-specific error and
+deployment evidence.
+
 ## Safe recommended actions
 - Stop new rollout activity and preserve timestamps and error types.
 - Prepare a rollback or forward fix using the approved release process.

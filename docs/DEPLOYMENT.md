@@ -1,5 +1,20 @@
 # Production deployment contract
 
+## Prerequisites
+
+- Linux host with Docker Engine and the Compose plugin;
+- existing TLS termination and Nginx virtual host for `api.marvinjb.dev`;
+- an immutable release archive that excludes Git metadata, `.env`, caches, logs,
+  tests, and credentials;
+- a separately transferred root-owned runtime environment containing strong
+  PostgreSQL and OpenAI credentials;
+- free loopback port `8002`, adequate disk space, and no conflicting deployment
+  directory;
+- a reviewed Alembic migration path and retained previous release for rollback.
+
+Deployment is intentionally manual and controlled. CI validates the code,
+migration, and image but never accesses the VPS or production credentials.
+
 ## Topology
 
 ```text
@@ -108,3 +123,72 @@ For rollback, retain prior immutable release directories and images. Repoint and
 restart only the Incident Agent API after validating the previous release against
 the current database schema. Do not reverse an Alembic migration automatically and
 never delete persistent volumes as part of rollback.
+
+## Post-deployment smoke checklist
+
+1. Confirm the API and PostgreSQL containers are healthy.
+2. Verify the API binds only to `127.0.0.1:8002`; PostgreSQL has no host port.
+3. Call loopback liveness and readiness with `Host: api.marvinjb.dev`.
+4. Call public HTTPS `/health/live` and `/health/ready`.
+5. Confirm exact CORS behavior for `https://marvinjb.dev` and rejection of an
+   unrelated origin.
+6. Confirm invalid hosts fail and security/request-ID headers are present.
+7. Confirm `/demo/*`, `/docs`, `/redoc`, and `/openapi.json` return 404.
+8. Verify a fresh public session can own its resource and a second session cannot.
+9. Inspect safe logs for startup/migration failures and credential-like output.
+10. Confirm the `current` pointer identifies the release that passed readiness.
+
+Do not run provider-backed investigations or remediation as an ordinary smoke
+check. Those require explicit authorization.
+
+## Rollback checklist
+
+1. Stop before rollback if the previous release is incompatible with the current
+   database schema.
+2. Keep PostgreSQL and application-log volumes attached and never run
+   `docker compose down --volumes`.
+3. Validate the previous immutable release and production environment.
+4. Repoint/restart only the Incident Agent API; do not restart other portfolio
+   services.
+5. Repeat Host-aware liveness/readiness and the public security smoke checks.
+6. Confirm the active release pointer after verification.
+
+Database migrations are not automatically downgraded. A failed or destructive
+migration needs a separately reviewed recovery plan.
+
+## Logs and troubleshooting
+
+Use Compose to inspect the Incident Agent API, migration job, and PostgreSQL
+containers. Application events are structured JSON on stdout and in the named
+application-log volume. Search only safe fields such as request ID, incident ID,
+event type, status, and error type; do not copy environment contents into logs.
+
+Common failures:
+
+- **Loopback health returns 400:** send `Host: api.marvinjb.dev`; do not weaken
+  TrustedHostMiddleware.
+- **Readiness returns 503:** inspect PostgreSQL health and migration completion
+  before restarting the API.
+- **Migration fails:** stop the release; do not advance `current`.
+- **Production configuration fails:** verify required variables are present
+  without printing their values and confirm `UVICORN_WORKERS=1`.
+- **Port 8002 is occupied:** stop and resolve the conflict; do not publish the API
+  on a broad interface.
+- **Investigation is unavailable:** use request IDs and safe error categories;
+  never log provider bodies, prompts, or credentials.
+
+## Persistence, backup, and retention
+
+PostgreSQL data and rotating application logs use the named volumes documented
+above. Normal release and rollback operations preserve both volumes.
+
+This portfolio deployment does **not** implement or claim an automated database
+backup/restore system. Before any change with data-loss risk, an operator must
+create and test an external PostgreSQL backup appropriate to the host. Formal
+backup scheduling, off-host retention, restore drills, and recovery objectives
+remain outside the current scope.
+
+Release directories are retained to support controlled rollback, but there is no
+automated retention policy. Review disk use and remove an old release only through
+an explicit operator decision after confirming it is not `current` or a required
+rollback target. Persistent volumes are never part of release cleanup.

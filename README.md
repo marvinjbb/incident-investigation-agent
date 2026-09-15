@@ -1,345 +1,188 @@
 # Incident Investigation Agent
 
-A production-style portfolio system for evidence-based investigation of application and PostgreSQL incidents. The finished system will gather logs, run restricted database diagnostics, inspect deployments, consult runbooks, construct a timeline, and produce a supported root-cause assessment. Any future corrective action will require explicit human approval.
+An evidence-grounded AI incident investigation system that diagnoses controlled application and PostgreSQL failures, recommends bounded remediation, requires human approval, and verifies recovery.
 
-Phase 5 adds a human-approved remediation boundary around the three synthetic lab scenarios. The AI remains read-only: application policy converts eligible, evidence-backed recommendations into typed proposals, a human must explicitly approve, execution revalidates live ownership, and success requires post-action recovery verification.
+**[Try the live demo](https://marvinjb.dev/demo/incident-investigation)**
 
-## Phase 5 architecture
+This is a production-deployed portfolio system built around a controlled synthetic incident lab—not a general autonomous SRE platform. The model investigates through eight read-only, allowlisted tools. It cannot run arbitrary SQL or shell commands and cannot execute remediation. Application policy validates its evidence and recommendation; a human must approve one of three application-owned actions before the executor can act.
 
-```text
-Incident
-   |
-   v
-AI Investigator (read-only tools)
-   |
-   v
-Evidence-backed Report
-   |
-   v
-Application Safety Policy
-   |
-   v
-Remediation Proposal (pending approval)
-   |
-   v
-HUMAN APPROVAL
-   |
-   v
-Live Precondition Revalidation
-   |
-   v
-Allowlisted Synthetic Remediation
-   |
-   v
-Post-Action Verification --> succeeded / failed
-```
+![Completed evidence-backed investigation with diagnosis, selected tools, and validated records](docs/assets/incident-investigation-demo.png)
 
-Investigation, recommendation, proposal, approval, and execution are distinct
-states. The model cannot approve or execute anything, and remediation functions
-are not registered as investigator tools.
+## Why this project exists
 
-### Allowlisted actions
+Incident-response assistants are useful only when their conclusions are traceable and their authority is constrained. This project demonstrates an agent that chooses diagnostics, tests a hypothesis, cites observed evidence, and recommends a response without receiving unrestricted infrastructure access.
 
-- `terminate_demo_blocker` rediscovers the current PostgreSQL blocking
-  relationship through a fixed query and requires both exact incident-lab
-  application names before calling `pg_terminate_backend`. No PID is accepted
-  from an API client or model output.
-- `release_demo_pool_pressure` stops only the in-process holder task belonging to
-  the currently active connection-exhaustion incident. It never changes pool
-  configuration.
-- `rollback_demo_deployment` operates only while the controlled `v2-bad` release
-  is active and only when trusted history contains healthy `v1`. Clients cannot
-  submit a version.
+It supports three genuine controlled failures:
 
-Proposals expire after five minutes by default. Approval and execution use
-separate endpoints. Execution is claimed atomically from `approved` to
-`executing`; successful repeated calls return the existing result. Every action
-rechecks incident identity, scenario, validated evidence, current active state,
-and target ownership immediately before mutation.
+- a PostgreSQL query blocked by a demo-owned transaction;
+- exhaustion of the application's own connection pool while PostgreSQL retains capacity;
+- an incompatible `v2-bad` deployment that produces a real PostgreSQL `UndefinedColumn` error.
 
-Execution alone is not success. The service verifies incident resolution and a
-healthy demo workload, plus removal of PostgreSQL blocking, restored pool
-availability, or active healthy `v1` as appropriate. Lifecycle events are stored
-in `remediation_audit_events`; safe application logs include IDs, action type,
-status, duration, and error class only.
-
-### Remediation API
+## System workflow
 
 ```text
-POST /demo/investigations/{investigation_id}/remediation-proposals
-GET  /demo/incidents/{incident_id}/remediations
-GET  /demo/remediations/{proposal_id}
-POST /demo/remediations/{proposal_id}/approve
-POST /demo/remediations/{proposal_id}/reject
-POST /demo/remediations/{proposal_id}/execute
+Controlled incident → bounded investigation → validated evidence-backed report
+→ application-owned proposal → human approval → allowlisted execution
+→ recovery verification → audit trail
 ```
 
-These public-demo endpoints accept application-generated UUIDs only. They never
-accept SQL, PIDs, deployment versions, paths, shell commands, or executable model
-text. Approval currently records an explicit human action without inventing an
-identity. Real operational use would require authentication, authorization,
-strong actor identity, and a distributed coordination design.
+This is agentic rather than conversational: the model selects diagnostic tools over multiple bounded turns, observes their results, and produces a structured report. It does not chat freely or receive a general execution environment.
 
-## Phase 4 architecture
+## Architecture and trust boundaries
+
+```mermaid
+flowchart TD
+    UI[Portfolio frontend] -->|HTTPS + session cookie| API[FastAPI public demo facade]
+    API --> CTRL[PostgreSQL-backed sessions, ownership, rate limits]
+    API --> LAB[Controlled incident lab]
+    LAB --> DB[(PostgreSQL)]
+    API --> AGENT[Investigation agent]
+    AGENT -->|bounded Responses API calls| MODEL[OpenAI]
+    AGENT -->|chooses among 8 read-only tools| TOOLS[Restricted diagnostics]
+    TOOLS --> LAB
+    TOOLS --> DB
+    TOOLS --> EVIDENCE[Application-owned evidence catalog]
+    EVIDENCE --> VALIDATE[Validate evidence IDs + runbook references]
+    VALIDATE --> REPORT[Evidence-backed report + recommendation]
+    REPORT --> POLICY[Application maps eligible recommendation]
+    POLICY --> PROPOSAL[Allowlisted remediation proposal]
+    PROPOSAL --> HUMAN{Human approves?}
+    HUMAN -->|reject| AUDIT[Audit trail]
+    HUMAN -->|approve| RECHECK[Ownership + TOCTOU revalidation]
+    RECHECK --> EXECUTOR[Allowlisted executor]
+    EXECUTOR --> VERIFY[Recovery verification]
+    VERIFY --> AUDIT
+```
+
+The model controls diagnostic selection and report generation. Application code controls capabilities, validation, proposal mapping, state revalidation, execution, and recovery checks. The human controls approval. Remediation functions are deliberately absent from the model tool registry.
+
+See [Architecture](docs/ARCHITECTURE.md) for component and lifecycle details.
+
+## Controlled scenarios
+
+| Scenario | Genuine evidence | Allowlisted action |
+| --- | --- | --- |
+| Blocked query | `pg_blocking_pids()`, lock wait, named demo sessions | `terminate_demo_blocker` |
+| Connection-pool exhaustion | live pool saturation, `PoolTimeout`, PostgreSQL capacity | `release_demo_pool_pressure` |
+| Bad deployment | active `v2-bad`, deployment timing, genuine `UndefinedColumn` | `rollback_demo_deployment` |
+
+Each incident automatically recovers when its bounded lifetime expires. Production uses the configured maximum of 120 seconds so investigation and a human decision can complete without removing that safety backstop.
+
+## Agent behavior
+
+The investigator initially receives only incident metadata and event tools. It can then choose from eight fixed diagnostics:
+
+1. incident metadata;
+2. incident events;
+3. bounded application logs;
+4. PostgreSQL blocking relationships;
+5. PostgreSQL connection utilization;
+6. application pool state;
+7. recent deployments;
+8. the scenario's allowlisted runbook.
+
+Tools accept no arbitrary SQL, path, PID, table, database, version, or shell argument. The default investigation budget is six model calls and ten tool calls, with a 45-second provider-call timeout and 3,000-token response ceiling. One bounded repair turn can correct invalid references; validation is never relaxed.
+
+The structured report contains an executive summary, cited timeline, primary and alternative hypotheses, key evidence, recommendations, uncertainties, runbook references, safe tool activity, and metrics. Every cited evidence ID must exist in the collected catalog, and every runbook reference must have been retrieved during that investigation.
+
+## Safety model
+
+| Boundary | Permitted |
+| --- | --- |
+| **AI may** | Select allowlisted read-only tools, interpret returned evidence, produce a diagnosis, and recommend an action. |
+| **AI may not** | Run arbitrary SQL or shell commands, read arbitrary files, choose a PID or deployment version, approve a proposal, or execute remediation. |
+| **Application** | Bind tools to one incident, validate evidence/runbooks, map eligible recommendations to one fixed action, and revalidate ownership and live preconditions. |
+| **Human** | Explicitly approve or reject the pending proposal. |
+| **Executor** | Run only the approved allowlisted action, verify scenario-specific recovery, and record audit events. |
+
+The public facade also enforces opaque HttpOnly sessions, cross-session denial, database-backed rate limits, one active incident globally, and one running investigation per incident. Internal diagnostic and raw-evidence routes are disabled in production.
+
+See [Security](SECURITY.md) and [API](docs/API.md).
+
+## Evaluation summary
+
+All three scenarios passed the documented offline and controlled production verification criteria.
+
+| Scenario | Diagnosis | Selective tools | Valid evidence | Human approval | Recovery verified |
+| --- | --- | --- | --- | --- | --- |
+| Blocked PostgreSQL query | Pass | Pass | Pass | Pass | Pass |
+| Application pool exhaustion | Pass | Pass | Pass | Pass | Pass |
+| Bad deployment | Pass | Pass | Pass | Pass | Pass |
+
+Evaluation checks diagnosis, scenario-relevant tool choice, citation membership, runbook references, model/tool budgets, approval, application-owned action, and recovery—not merely whether the model returned text. See [Evaluation](docs/EVALUATION.md).
+
+## Production deployment
 
 ```text
-Demo incident --> Application + PostgreSQL --> Technical evidence
-                                                   |
-                                                   v
-                                      Restricted diagnostic tools
-                                      |-- incident events
-                                      |-- rotating application logs
-                                      |-- PostgreSQL locks/connections
-                                      |-- application pool state
-                                      |-- deployment history
-                                      `-- allowlisted runbooks
-                                                   |
-                                                   v
-                                         Evidence collector
-                                                   |
-                                                   v
-                                         Structured evidence API
-                                                   |
-                                                   v
-                                      Bounded AI investigator
-                                                   |
-                                                   v
-                                      Validated persisted report
+marvinjb.dev → api.marvinjb.dev → Cloudflare/TLS → Nginx
+→ FastAPI on 127.0.0.1:8002 → private PostgreSQL container
+                                  ↘ OpenAI Responses API
 ```
+
+The service runs as a non-root container. PostgreSQL has no public host port. Alembic runs before API startup, liveness and database readiness are separate, production CORS is restricted to `https://marvinjb.dev`, and internal routes plus API documentation are disabled.
+
+Production intentionally runs one Uvicorn worker because the genuine pool-exhaustion experiment owns process-local checked-out connections. Multi-worker operation requires a dedicated incident-lab coordinator rather than a fake shared counter.
+
+Deployment remains a controlled manual release process; CI validates but never deploys. See [Deployment](docs/DEPLOYMENT.md).
+
+## Technology stack
+
+| Area | Technologies |
+| --- | --- |
+| Application | Python 3.12, FastAPI, Pydantic, asyncio |
+| AI | OpenAI Responses API, structured outputs, bounded tool calling |
+| Data | PostgreSQL 17, psycopg, psycopg-pool, Alembic |
+| Operations | Docker, Docker Compose, Nginx, HTTPS, structured JSON logging |
+| Quality | pytest, pytest-asyncio, Ruff, GitHub Actions |
+
+## Public API overview
 
 ```text
-Controlled incident --> restricted tools <--> AI investigator
-                                            |
-                                            v
-                              evidence-backed validated report
-                                            |
-                                            v
-                               application safety policy
-                                            |
-                                            v
-                           human-approved bounded remediation
+POST /api/demo/incidents
+GET  /api/demo/incidents/{incident_id}
+POST /api/demo/incidents/{incident_id}/investigate
+GET  /api/demo/investigations/{investigation_id}
+POST /api/demo/investigations/{investigation_id}/remediation
+POST /api/demo/remediations/{proposal_id}/approve
+POST /api/demo/remediations/{proposal_id}/execute
+GET  /health/live
+GET  /health/ready
 ```
 
-## Agentic investigation workflow
+Public requests use an opaque session cookie. Resource ownership is checked on each later operation. Rate-limited responses include `Retry-After`; safe errors include an `X-Request-ID`. See [API documentation](docs/API.md) for payloads and status codes.
 
-The application sends an incident identifier and initially exposes only the
-incident metadata and event tools to the OpenAI Responses API. After that minimal
-context is returned, the full set of eight strict diagnostic definitions becomes
-available. The model must choose tools that confirm or disprove its current
-hypothesis rather than enumerating every capability. It receives each bounded
-result as explicitly untrusted evidence data and may request more tools only when
-needed. Application code rejects unknown tools and arguments and never exposes a
-SQL, filesystem, shell, or remediation capability.
+## Local development
 
-The explicit loop allows at most six model calls and ten total tool calls. Each
-provider call has a 45-second timeout and a 3,000-token output ceiling. Those
-defaults are configurable through backend environment variables. Budget
-exhaustion terminates safely. The safe activity trace records only tool name,
-timestamp, status, and result count; prompts, evidence contents, provider bodies,
-and hidden reasoning are not logged or persisted.
-
-Final reports separate observed evidence from AI interpretation. They contain an
-executive summary, cited timeline, qualitative primary hypothesis, alternatives,
-key evidence, recommendations with approval flags, uncertainties, and runbook
-references. The application attaches the exact evidence snapshot and rejects any
-unknown evidence or runbook citation. AI conclusions are stored in the separate
-`investigations` table, never in raw incident/evidence records.
-
-Retrieved logs and runbooks are treated as untrusted data. Provider instructions
-explicitly require ignoring embedded instructions, and tool output carries a data
-boundary marker. Even a successful prompt injection cannot create a capability:
-the registry recognizes only fixed, argument-free diagnostic functions.
-
-Docker Compose runs the API and PostgreSQL on a private network. The API uses the Compose service name `db`, not container-local `localhost`. PostgreSQL health gates API startup, and the application applies the small idempotent schema at startup so existing development volumes receive schema updates safely.
-
-## Incident scenarios
-
-### Blocked PostgreSQL query
-
-One transaction updates the single allowlisted row in `demo_lock_target` and holds its row lock. A second named PostgreSQL session attempts the same update and blocks. The lab confirms the blocking relationship through `pg_blocking_pids()` before recording `query_blocked`. Recovery rolls both transactions back, so the demo row is never permanently changed.
-
-### Connection pool exhaustion
-
-The workload pool has a fixed default maximum of three connections. The scenario checks out exactly those connections and holds them until recovery or timeout. `/demo/workload` then fails through a genuine `PoolTimeout`, while incident control metadata remains available through separate bounded connections. Recovery returns every connection to the pool.
-
-### Failing application deployment
-
-The lab records and activates `v2-bad`. While active, `/demo/workload` executes an intentionally incompatible, fixed query against `demo_workload`, producing PostgreSQL `UndefinedColumn` evidence. Recovery records and reactivates healthy `v1`. No SQL or version value comes from the caller.
-
-## Safety boundaries
-
-- Three explicit POST routes; no generic scenario or command endpoint
-- No arbitrary SQL, shell commands, file paths, database names, or release names
-- One active incident per API process
-- Durations from 3 to 120 seconds; default 8 seconds
-- Application pool fixed to a small configured maximum
-- Incident and deployment history capped at 100 records each by default
-- Docker JSON logs rotated at three 10 MB files per service
-- Automatic cleanup plus an explicit recovery endpoint
-- Transaction rollback for the blocked-query scenario
-- Fixed healthy release restoration for the bad-deployment scenario
-- Generic client errors with no credentials or stack traces
-- Startup recovery marks interrupted incidents resolved and restores `v1`
-
-This is a single-process portfolio lab. Multi-process coordination, authentication, and public rate limiting belong to a later deployment-hardening phase.
-
-## Restricted diagnostics and evidence
-
-The `app/tools` package is the sole diagnostic boundary intended for a future
-investigator. Tools accept typed, narrow inputs and return application-owned
-`EvidenceItem` records. Each record has an application-generated ID, source,
-type, optional timestamp and incident ID, factual summary, sanitized structured
-details, and a logical source reference. The collector combines records but does
-not rank evidence, infer a cause, create a timeline, or recommend remediation.
-
-The PostgreSQL tools execute fixed read-only queries against system views. There
-is no SQL, identifier, table, or command supplied by a client. The log tool reads
-only the configured application JSONL path, applies equality filters, skips
-malformed records, redacts secret-bearing fields, and caps results. The runbook
-tool maps the three scenario enum values to three fixed filenames; it never
-accepts a path.
-
-Application logs are emitted as structured JSON to both stdout and a rotating
-JSONL file. The file defaults to 1 MB with two backups and is mounted in a named
-Docker volume. This preserves stdout operations while making bounded log evidence
-programmatically available.
-
-### Evidence sources
-
-Incident and deployment metadata are stored in PostgreSQL. `incident_events` records non-AI source events including:
-
-- `incident_started`
-- `lock_acquired`
-- `query_blocked`
-- `pool_saturated`
-- `request_failed`
-- `deployment_started`
-- `deployment_activated`
-- `recovery_requested`
-- `incident_recovered`
-
-Application logs remain available through stdout:
+Prerequisites: Docker with Compose, or Python 3.12 plus PostgreSQL 17.
 
 ```bash
-docker compose logs api
-```
-
-They include event type and bounded context such as incident ID, scenario, request path, deployment version, and exception type. Passwords, connection strings, tokens, prompts, and stack traces are not logged.
-
-Three concise runbooks live in `runbooks/`: `blocked-query.md`,
-`connection-exhaustion.md`, and `bad-deployment.md`. They describe generic
-symptoms, checks, evidence, likely causes, safe actions, approval boundaries, and
-escalation conditions. They do not contain incident-specific conclusions.
-
-## API
-
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Process liveness |
-| `GET` | `/health/db` | PostgreSQL connectivity |
-| `POST` | `/demo/incidents/blocked-query` | Start the row-lock scenario |
-| `POST` | `/demo/incidents/connection-exhaustion` | Saturate the workload pool |
-| `POST` | `/demo/incidents/bad-deployment` | Activate `v2-bad` |
-| `GET` | `/demo/incidents/{incident_id}` | Read incident state and timeline |
-| `GET` | `/demo/incidents/{incident_id}/evidence` | Collect bounded, sanitized source evidence |
-| `POST` | `/demo/incidents/{incident_id}/investigate` | Run a bounded AI investigation |
-| `GET` | `/demo/investigations/{investigation_id}` | Retrieve a persisted investigation |
-| `GET` | `/demo/incidents/{incident_id}/investigations` | List up to 20 incident investigations |
-| `POST` | `/demo/incidents/{incident_id}/recover` | Request bounded recovery |
-| `GET` | `/demo/workload` | Exercise the active release and pool |
-| `GET` | `/demo/deployments` | Read deployment history |
-| `GET` | `/demo/diagnostics/pool` | Read safe pool counts |
-
-Incident start requests accept only an optional bounded duration:
-
-```json
-{"duration_seconds": 8}
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` for local overrides. The example contains development-only defaults, not production credentials. `.env` is ignored by Git.
-
-| Variable | Purpose | Development default |
-| --- | --- | --- |
-| `POSTGRES_HOST` | PostgreSQL hostname | `localhost`; Compose supplies `db` |
-| `POSTGRES_PORT` | PostgreSQL port | `5432` |
-| `POSTGRES_DB` | Incident-lab database | `incident_lab` |
-| `POSTGRES_USER` | Incident-lab user | `incident_app` |
-| `POSTGRES_PASSWORD` | Local development password | `incident_lab_dev` |
-| `DATABASE_CONNECT_TIMEOUT_SECONDS` | Connection timeout | `3` |
-| `DATABASE_POOL_SIZE` | Workload pool maximum | `3` |
-| `DATABASE_POOL_TIMEOUT_SECONDS` | Pool acquisition timeout | `1` |
-| `INCIDENT_DEFAULT_DURATION_SECONDS` | Default incident duration | `8` |
-| `INCIDENT_MAX_DURATION_SECONDS` | Hard duration ceiling | `15` |
-| `INCIDENT_HISTORY_LIMIT` | Retained incident records | `100` |
-| `DEPLOYMENT_HISTORY_LIMIT` | Retained deployment records | `100` |
-| `DIAGNOSTIC_RESULT_LIMIT` | Per-tool result ceiling | `25` |
-| `EVIDENCE_RESULT_LIMIT` | Evidence bundle ceiling | `100` |
-| `LOG_PATH` | Application-controlled JSONL path | `logs/application.jsonl` |
-| `LOG_MAX_BYTES` | Rotating JSONL file size | `1000000` |
-| `LOG_BACKUP_COUNT` | Retained JSONL backups | `2` |
-| `OPENAI_API_KEY` | OpenAI credential; backend runtime only | none |
-| `OPENAI_MODEL` | Responses API model | `gpt-5.6-luna` |
-| `INVESTIGATION_MAX_ITERATIONS` | Model-call ceiling | `6` |
-| `INVESTIGATION_MAX_TOOL_CALLS` | Diagnostic-call ceiling | `10` |
-| `INVESTIGATION_TIMEOUT_SECONDS` | Per-provider-call timeout | `45` |
-| `INVESTIGATION_MAX_OUTPUT_TOKENS` | Per-call output ceiling | `3000` |
-| `API_PORT` | Optional host-side Compose port | `8000` |
-
-Use real secret management and a strong runtime password outside this local lab.
-
-## Run locally
-
-```bash
+cp .env.example .env
 docker compose up --build
 ```
 
-Verify health and the normal workload:
+On Windows PowerShell, use `Copy-Item .env.example .env`. The example contains local development defaults and an empty `OPENAI_API_KEY`. Never commit `.env`.
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/health/db
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
 curl http://localhost:8000/demo/workload
 ```
 
-Trigger and observe a blocked-query incident:
-
-```bash
-curl -X POST http://localhost:8000/demo/incidents/blocked-query \
-  -H "Content-Type: application/json" \
-  -d '{"duration_seconds":8}'
-
-curl http://localhost:8000/demo/incidents/INCIDENT_ID
-curl http://localhost:8000/demo/incidents/INCIDENT_ID/evidence
-curl -X POST http://localhost:8000/demo/incidents/INCIDENT_ID/recover
-```
-
-Use the other fixed start routes for `connection-exhaustion` and `bad-deployment`. During those incidents, call `/demo/workload`; it returns a bounded HTTP 503. After automatic or manual recovery, it returns healthy `v1` again.
-
-Observe PostgreSQL blocking directly:
-
-```bash
-docker compose exec db psql -U incident_app -d incident_lab -c \
-  "SELECT pid, application_name, pg_blocking_pids(pid) FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0;"
-```
-
-Stop services while preserving data:
-
-```bash
-docker compose down
-```
-
-## Direct Python development
+Direct Python development:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+source .venv/bin/activate  # PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]" -c requirements.lock
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-## Tests and static checks
+The direct path requires PostgreSQL configured through the environment. See [.env.example](.env.example).
+
+## Testing
+
+Ordinary validation is offline and never calls OpenAI:
 
 ```bash
 pytest
@@ -347,111 +190,47 @@ ruff check .
 ruff format --check .
 ```
 
-The automated suite uses dependency replacement and in-memory fakes; it does not require Docker or arbitrary sleep timing. It covers fixed diagnostic queries, bounds, pool/server distinction, log redaction, runbook allowlisting, evidence collection, and the evidence API. Real PostgreSQL behavior is verified separately through the Compose lab by collecting evidence while each incident is active.
+`requirements.lock` records the dependency versions used for the verified environment. After intentionally changing dependencies, recreate the environment, verify the suite, and update the lock with `python -m pip freeze --exclude-editable`.
 
-Offline tests never call OpenAI. Optional live evaluations require the ignored
-`.env` to contain `OPENAI_API_KEY`, a running Compose stack, and available API
-credits:
+Optional provider and mutating lab checks are documented separately because they must never run automatically in ordinary CI. See [Evaluation](docs/EVALUATION.md) and [Contributing](CONTRIBUTING.md).
 
-```bash
-python scripts/live_evaluations.py
-python scripts/live_remediations.py
-```
+## Observability
 
-The deterministic evaluator checks scenario-specific conclusions, citation
-membership, report structure, tool/iteration budgets, and absence of executed
-remediation claims.
+The application emits structured JSON to stdout and a bounded rotating JSONL file. It records request IDs, safe resource IDs, event types, latency, status, selected tools, result counts, model/tool-call totals, provider error categories, incident events, and remediation audit events.
 
-## Current limitations
+It does not log credentials, prompts, provider response bodies, evidence contents, unrestricted logs, or hidden reasoning. `/health/live` checks the process; `/health/ready` checks PostgreSQL. Centralized metrics, traces, alerts, and log aggregation are outside this portfolio's scope.
 
-- Incident coordination is process-local and intended for one Uvicorn worker.
-- The lab has no authentication or public rate limiting yet.
-- Logs are local rotating JSONL plus stdout, not a centralized log platform.
-- Schema changes use one idempotent SQL file; a migration framework is not justified yet.
-- Investigation coordination remains synchronous and process-local.
-- Remediation is limited to one active synthetic incident in one API process.
-- Approval records an explicit demo action but has no authenticated actor identity yet.
-## Phase 6: public-demo hardening
+## Deliberate limitations
 
-The production-facing API is a deliberately small, session-scoped facade over the
-synthetic lab. It does not expose diagnostic tools, raw logs, arbitrary prompts, or
-general infrastructure administration.
+- Controlled synthetic lab with exactly three incident scenarios.
+- Eight read-only diagnostic tools and three bounded remediation actions.
+- No arbitrary SQL, shell, filesystem path, PID, or deployment-version capability.
+- Single Uvicorn worker in production because the pool experiment owns real process-local resources.
+- Anonymous session-scoped public demo rather than enterprise IAM and authenticated actor identity.
+- OpenAI dependency for live investigation; offline validation uses fakes/mocks.
+- Database-backed public rate limits and one globally active synthetic incident.
+- Local structured stdout/JSONL logs rather than centralized enterprise observability.
+- No claim of general autonomous SRE behavior or unrestricted infrastructure management.
 
-```text
-marvinjb.dev
-    -> /api/demo (opaque HttpOnly session cookie)
-    -> PostgreSQL ownership + rate-limit records
-    -> existing incident lab / investigator / remediation policy
-    -> curated incident, activity, report, and verification models
-```
+These constraints are intentional. The horizontal-scaling path is a dedicated incident-lab coordinator behind stateless API workers.
 
-Public routes:
+## Documentation
 
-- `POST /api/demo/incidents`
-- `GET /api/demo/incidents/{incident_id}`
-- `POST /api/demo/incidents/{incident_id}/investigate`
-- `GET /api/demo/investigations/{investigation_id}`
-- `POST /api/demo/investigations/{investigation_id}/remediation`
-- `POST /api/demo/remediations/{proposal_id}/approve`
-- `POST /api/demo/remediations/{proposal_id}/execute`
-- `GET /health/live` and `GET /health/ready`
+- [Architecture](docs/ARCHITECTURE.md)
+- [Evaluation](docs/EVALUATION.md)
+- [Public API](docs/API.md)
+- [Deployment and operations](docs/DEPLOYMENT.md)
+- [Lessons learned](docs/LESSONS_LEARNED.md)
+- [Security](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Runbooks](runbooks/)
 
-The original `/demo/*` routes are development/internal verification routes. They
-return `404` when `ENVIRONMENT=production` and `EXPOSE_INTERNAL_ROUTES=false`.
-Raw evidence and diagnostics are therefore not part of the public contract.
+## Lessons learned
 
-### Sessions, limits, and cleanup
+The project exposed practical failures that changed its design: indiscriminate tool use, invented evidence/runbook references, timeouts shorter than the human workflow, Host-header-sensitive health checks, a synthetic deployment that initially failed to generate real evidence, and a stale release pointer despite healthy containers.
 
-Sessions are opaque, application-generated UUIDs stored in PostgreSQL and carried in
-an HttpOnly, Secure-in-production, SameSite=Strict cookie. Every public resource is
-joined back to its owning session; cross-session lookups return the same safe 404 as
-unknown resources.
+See [Lessons learned](docs/LESSONS_LEARNED.md) for the resulting engineering decisions.
 
-Default rolling-window limits (600 seconds) are database-backed and atomic:
+## License
 
-- 3 incident creations globally;
-- 2 investigations per session;
-- 6 remediation operations per session.
-
-Rate-limit rejection returns `429` with `Retry-After`. Only one synthetic incident
-can be active globally, and only one investigation can run per incident. Sessions
-expire after 30 minutes. Expired sessions and old rate events are pruned without
-allowing unbounded public history.
-
-### Coordination limitation
-
-PostgreSQL now owns public session isolation, global active-incident uniqueness,
-running-investigation uniqueness, rate limits, and remediation state transitions.
-These remain correct across concurrent requests and restarts. The synthetic
-connection-pool holder task is still owned by the process that created it, so the
-production command intentionally remains one Uvicorn worker. Multiple workers are
-not claimed as supported until that lab mechanism is redesigned or moved to a
-dedicated incident-lab coordinator. Production settings reject
-`UVICORN_WORKERS != 1`, and the production Compose command explicitly starts one
-worker so an ordinary configuration mistake cannot silently violate this boundary.
-
-### Schema migrations
-
-Alembic is now the explicit production schema mechanism. Application startup no
-longer runs schema DDL. Apply migrations before starting the API:
-
-```powershell
-.venv\Scripts\alembic.exe upgrade head
-```
-
-Docker Compose runs the one-shot `migrate` service and starts the API only after the
-migration succeeds.
-
-### Production security
-
-- Production CORS is exactly `https://marvinjb.dev`; wildcard CORS is rejected.
-- Production requires runtime OpenAI and PostgreSQL credentials and disables
-  internal routes.
-- Callers cannot select a model, prompt, tool, PID, SQL statement, or deployment.
-- Existing iteration, tool-call, output-token, and timeout bounds remain enforced.
-- The AI investigator has no remediation tools. Human approval and TOCTOU checks
-  remain mandatory before one of three fixed synthetic actions executes.
-- Request IDs, safe resource IDs, latency, status, and provider error classes are
-  logged; prompts, provider bodies, evidence contents, and credentials are not.
-
-See `docs/DEPLOYMENT.md` for reverse-proxy and production startup expectations.
+No open-source license has been selected. The repository is publicly inspectable portfolio source but should not be treated as licensed open-source software.

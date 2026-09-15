@@ -19,6 +19,9 @@
 - Pool size or timeout unsuitable for the bounded workload.
 - A database-wide connection limit only when server utilization supports it.
 
+Do not infer that PostgreSQL reached `max_connections` from application pool
+exhaustion. Compare both capacity layers.
+
 ## Safe recommended actions
 - Stop the controlled load and confirm connections return to the pool.
 - Inspect connection lifetime and transaction boundaries.

@@ -18,6 +18,9 @@
 - An application transaction held open longer than intended.
 - Concurrent updates targeted the same row or lock scope.
 
+Do not infer database-wide exhaustion from a lock wait. Confirm the exact blocked
+and blocking relationship first.
+
 ## Safe recommended actions
 - Identify the owning workload and allow a known short transaction to complete.
 - Reduce transaction scope and add regression coverage after recovery.

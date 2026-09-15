@@ -1,0 +1,14 @@
+title = "Incident Investigation Agent gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact synthetic database URL used only to test recursive redaction"
+regexes = [
+  '''postgresql://user:pass@db/lab''',
+]
+paths = [
+  '''tests/test_diagnostic_tools.py''',
+]
+condition = "AND"

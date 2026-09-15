@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: incident_lab
+          POSTGRES_USER: incident_app
+          POSTGRES_PASSWORD: incident_lab_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U incident_app -d incident_lab"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENVIRONMENT: test
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: incident_lab
+      POSTGRES_USER: incident_app
+      POSTGRES_PASSWORD: incident_lab_ci
+      LOG_PATH: /tmp/incident-agent-ci.jsonl
+      OPENAI_API_KEY: ""
+      UVICORN_WORKERS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install reproducible development dependencies
+        run: python -m pip install -e ".[dev]" -c requirements.lock
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Offline tests
+        run: pytest
+      - name: Validate baseline migration
+        run: alembic upgrade head
+      - name: Build production image
+        run: docker build --tag incident-investigation-agent:ci .
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan Git history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

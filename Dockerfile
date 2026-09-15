@@ -5,14 +5,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY pyproject.toml requirements.lock ./
 COPY app ./app
 COPY db ./db
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY runbooks ./runbooks
 
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir . -c requirements.lock \
     && groupadd --system incident-agent \
     && useradd --system --gid incident-agent --home-dir /app incident-agent \
     && mkdir -p /app/logs \
