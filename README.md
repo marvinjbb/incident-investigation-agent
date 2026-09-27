@@ -1,32 +1,56 @@
 # Incident Investigation Agent
 
-An evidence-grounded AI incident investigation system that diagnoses controlled application and PostgreSQL failures, recommends bounded remediation, requires human approval, and verifies recovery.
+This is a working AI incident-investigation system that creates controlled application and PostgreSQL failures, investigates them using a fixed set of approved diagnostic tools, produces an evidence-backed report, and requires human approval before any remediation action.
 
 **[Try the live demo](https://marvinjb.dev/demo/incident-investigation)**
 
-This is a production-deployed portfolio system built around a controlled synthetic incident lab—not a general autonomous SRE platform. The model investigates through eight read-only, allowlisted tools. It cannot run arbitrary SQL or shell commands and cannot execute remediation. Application policy validates its evidence and recommendation; a human must approve one of three application-owned actions before the executor can act.
+## Why I built it
+
+I come from a production database background, where incident response means gathering evidence, identifying the root cause, choosing a safe next step, and verifying recovery. I built this project to explore how AI could assist that process without giving the model unrestricted access to production systems.
+
+## A safe public lab
+
+The public version uses controlled synthetic failures so the complete investigation, approval, remediation, and recovery workflow can be demonstrated safely. The failure conditions are intentional, while the application behavior, PostgreSQL evidence, AI investigation, validation, approval flow, remediation, and recovery checks are real.
 
 ![Completed evidence-backed investigation with diagnosis, selected tools, and validated records](docs/assets/incident-investigation-demo.png)
 
-## Why this project exists
+## How it works
 
-Incident-response assistants are useful only when their conclusions are traceable and their authority is constrained. This project demonstrates an agent that chooses diagnostics, tests a hypothesis, cites observed evidence, and recommends a response without receiving unrestricted infrastructure access.
+1. **Create Incident** — Choose one of three controlled failure scenarios.
+2. **Investigate** — The AI uses approved diagnostic tools to gather evidence.
+3. **Find Root Cause** — The system produces a report backed by real evidence.
+4. **Approve Fix** — A human reviews and approves the recommended action.
+5. **Fix & Verify** — The system performs the approved action and confirms recovery.
 
-It supports three genuine controlled failures:
+The three scenarios are:
 
 - a PostgreSQL query blocked by a demo-owned transaction;
 - exhaustion of the application's own connection pool while PostgreSQL retains capacity;
 - an incompatible `v2-bad` deployment that produces a real PostgreSQL `UndefinedColumn` error.
 
-## System workflow
+## What the AI can inspect
 
-```text
-Controlled incident → bounded investigation → validated evidence-backed report
-→ application-owned proposal → human approval → allowlisted execution
-→ recovery verification → audit trail
-```
+- Incident details
+- Incident timeline
+- Application logs
+- Database blocking
+- Database connection usage
+- Application connection pool
+- Recent deployments
+- Approved runbook
 
-This is agentic rather than conversational: the model selects diagnostic tools over multiple bounded turns, observes their results, and produces a structured report. It does not chat freely or receive a general execution environment.
+The model cannot run arbitrary SQL, shell commands, filesystem operations, or infrastructure actions.
+
+## Safety model at a glance
+
+- **Approved tools only:** the model can investigate only through eight application-owned diagnostic tools.
+- **Conclusions backed by evidence:** every cited evidence ID and runbook reference must come from the current investigation.
+- **Human approval before fixes:** the model can recommend an action but cannot approve or execute it.
+- **Revalidation before action:** ownership and live technical preconditions are checked again immediately before execution.
+- **Recovery verification:** execution counts as successful only after scenario-specific checks confirm recovery.
+- **Controlled public limits:** sessions, rate limits, bounded incident lifetimes, automatic recovery, and one production worker constrain the public lab.
+
+The deeper architecture and operational details below explain how those boundaries are enforced.
 
 ## Architecture and trust boundaries
 
