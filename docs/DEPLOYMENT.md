@@ -86,6 +86,10 @@ header correctly returns HTTP 400 and must not be interpreted as a startup failu
 The production demo uses the bounded 120-second incident lifetime and retains
 automatic recovery. This allows an investigation to finish before the proposal,
 approval, and execution steps while ensuring abandoned synthetic incidents recover.
+The public limits are database-backed and survive API restarts: three incident
+creations globally, two investigations per session, and six remediation operations
+per session in each 600-second window. These are portfolio-demo controls, not an
+enterprise identity or quota system.
 
 ## Route exposure
 

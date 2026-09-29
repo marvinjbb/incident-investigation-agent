@@ -31,3 +31,11 @@ The pool scenario owns real in-process connections. Multiple API workers could s
 ## 8. Deployment verification includes release identity
 
 Healthy containers do not prove the intended release is current. The deployment helper advances the release pointer only after migrations, liveness, and readiness succeed.
+
+## 9. Human approval does not eliminate stale-state risk
+
+Approval can arrive after the incident, proposal, or supporting conditions have changed. Execution must recheck ownership, expiration, policy evidence, incident state, and live scenario preconditions, then atomically claim the proposal before acting.
+
+## 10. Executor completion is not recovery
+
+An allowlisted function returning without an exception does not prove the service recovered. The system separately verifies incident resolution, workload health, and the scenario-specific condition before recording success.

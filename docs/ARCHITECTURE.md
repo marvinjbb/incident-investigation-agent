@@ -51,8 +51,12 @@ sequenceDiagram
     API->>API: Map recommendation through policy
     API->>DB: Persist pending proposal
     Human->>API: Explicit approval
-    API->>Exec: Approved proposal
-    Exec->>DB: Claim execution + revalidate state
+    UI->>API: Execute approved proposal
+    API->>DB: Recheck session ownership
+    API->>Exec: Approved proposal ID
+    Exec->>DB: Recheck state, expiry, evidence policy
+    Exec->>DB: Atomically claim approved proposal
+    Exec->>Lab: Revalidate live scenario preconditions
     Exec->>Lab: One allowlisted demo action
     Exec->>Lab: Verify workload and scenario recovery
     Exec->>DB: Persist result and audit lifecycle
@@ -93,6 +97,8 @@ The final report may interpret evidence, but every citation must resolve to the 
 
 No hidden reasoning is stored. The persisted activity trace contains only tool name, status, timestamp, and bounded result count.
 
+Identifier validity proves provenance inside the bounded investigation: the record was collected for that incident and a referenced runbook was actually retrieved. It does not mechanically prove that the model's causal interpretation is correct, that the evidence is complete, or that the diagnosis generalizes beyond the three controlled scenarios.
+
 ## Provider boundary
 
 `InvestigationProvider` is an application-owned protocol. `OpenAIInvestigationProvider` is the only provider-specific adapter and uses the Responses API with strict function definitions and structured output. API routes and diagnostic tools do not call the OpenAI SDK directly.
@@ -104,6 +110,14 @@ Remediation is not an AI tool. Application policy can create only `terminate_dem
 A proposal begins in `pending_approval`, expires after a bounded TTL, and requires an explicit approval request. Execution atomically claims it, checks ownership and current conditions again, and never accepts a caller-provided PID or version. Repeated execution of a completed action returns its existing result; failed execution is not automatically retried.
 
 Success requires a resolved incident, healthy workload, and the scenario-specific condition. Audit events cover proposal, approval, execution, verification, failure, rejection, and expiration.
+
+### TOCTOU sequence
+
+Investigation and approval are observations at particular points in time. Before execution, the public facade verifies session ownership; the service checks proposal status and expiration; policy is rebuilt from the persisted investigation, scenario, and supporting evidence; the incident must still be active; and the approved proposal is atomically transitioned to `executing`. The incident lab then rechecks the live scenario-specific condition before touching the demo resource. This time-of-check/time-of-use sequence prevents an old recommendation from authorizing action after the incident or ownership state has changed.
+
+### Recovery verification
+
+Executor completion alone is not success. Every action must leave the incident resolved and the fixed demo workload healthy. The blocked-query action must also remove the PostgreSQL blocking relationship; pool-pressure release must restore pool availability; and deployment rollback must restore healthy `v1`. A failed check marks remediation failed rather than reporting a successful recovery.
 
 ## Persistence
 

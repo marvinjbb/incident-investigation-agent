@@ -1,8 +1,17 @@
 # Incident Investigation Agent
 
-This is a working AI incident-investigation system that creates controlled application and PostgreSQL failures, investigates them using a fixed set of approved diagnostic tools, produces an evidence-backed report, and requires human approval before any remediation action.
+Incident Investigation Agent is a production-deployed AI incident-response lab that creates controlled application and PostgreSQL failures, investigates them through restricted diagnostics, produces evidence-backed findings, and requires human approval before any allowlisted remediation runs.
 
 **[Try the live demo](https://marvinjb.dev/demo/incident-investigation)**
+
+**Stack:** Python · FastAPI · PostgreSQL · Pydantic · OpenAI Responses API · Docker · Nginx
+
+```text
+Controlled Incident → AI Investigation → Restricted Diagnostics
+→ Evidence Catalog → Root-Cause Report → Remediation Proposal
+→ Human Approval → Application Revalidation → Allowlisted Action
+→ Recovery Verification → Audit Trail
+```
 
 ## Why I built it
 
@@ -11,6 +20,8 @@ I come from a production database background, where incident response means gath
 ## A safe public lab
 
 The public version uses controlled synthetic failures so the complete investigation, approval, remediation, and recovery workflow can be demonstrated safely. The failure conditions are intentional, while the application behavior, PostgreSQL evidence, AI investigation, validation, approval flow, remediation, and recovery checks are real.
+
+The separate portfolio frontend starts with the three scenario choices, then walks the user through investigation, evidence, recommendation, approval, action, and recovery. This repository contains the backend service and safety controls, not the React presentation layer.
 
 ![Completed evidence-backed investigation with diagnosis, selected tools, and validated records](docs/assets/incident-investigation-demo.png)
 
@@ -109,17 +120,28 @@ Tools accept no arbitrary SQL, path, PID, table, database, version, or shell arg
 
 The structured report contains an executive summary, cited timeline, primary and alternative hypotheses, key evidence, recommendations, uncertainties, runbook references, safe tool activity, and metrics. Every cited evidence ID must exist in the collected catalog, and every runbook reference must have been retrieved during that investigation.
 
+Exact identifier validation proves provenance inside one investigation: the cited record exists and the runbook was retrieved. It does not prove that the model's causal interpretation is universally correct, that the diagnosis generalizes beyond these controlled scenarios, or that semantic reasoning is infallible.
+
 ## Safety model
 
 | Boundary | Permitted |
 | --- | --- |
 | **AI may** | Select allowlisted read-only tools, interpret returned evidence, produce a diagnosis, and recommend an action. |
-| **AI may not** | Run arbitrary SQL or shell commands, read arbitrary files, choose a PID or deployment version, approve a proposal, or execute remediation. |
+| **AI may not** | Run arbitrary SQL or shell commands, read arbitrary files, choose a PID or deployment version, create a remediation action, approve a proposal, or execute remediation. |
 | **Application** | Bind tools to one incident, validate evidence/runbooks, map eligible recommendations to one fixed action, and revalidate ownership and live preconditions. |
 | **Human** | Explicitly approve or reject the pending proposal. |
 | **Executor** | Run only the approved allowlisted action, verify scenario-specific recovery, and record audit events. |
 
 The public facade also enforces opaque HttpOnly sessions, cross-session denial, database-backed rate limits, one active incident globally, and one running investigation per incident. Internal diagnostic and raw-evidence routes are disabled in production.
+
+Remediation functions are deliberately absent from the model tool registry. A model recommendation is structured input to application policy—not execution authority:
+
+```text
+Model recommendation → application policy mapping → proposal
+→ human approval → deterministic allowlisted executor
+```
+
+Approval is a real control boundary. Immediately before execution, the application checks session ownership, proposal state and expiration, evidence/action policy, and the current technical preconditions again because the incident may have changed after investigation.
 
 See [Security](SECURITY.md) and [API](docs/API.md).
 
@@ -213,6 +235,8 @@ pytest
 ruff check .
 ruff format --check .
 ```
+
+The current offline suite contains **86 passing tests**. It covers the incident lab, restricted diagnostics, grounding, sessions and limits, remediation policy and approval, stale-state rejection, recovery verification, migrations/configuration, and safe API behavior through fakes and dependency replacement.
 
 `requirements.lock` records the dependency versions used for the verified environment. After intentionally changing dependencies, recreate the environment, verify the suite, and update the lock with `python -m pip freeze --exclude-editable`.
 

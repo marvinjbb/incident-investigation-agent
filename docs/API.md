@@ -11,7 +11,7 @@ create incident → read incident → investigate → read investigation
 → request proposal → approve → execute → inspect verified result
 ```
 
-The first successful incident request sets an opaque HttpOnly cookie scoped to `/api/demo`. Browser clients must retain it. Every later resource is checked against that session; unknown and cross-session identifiers receive the same safe `404`.
+The first successful incident request sets an opaque HttpOnly, `SameSite=Strict` cookie scoped to `/api/demo`; production also marks it `Secure`. Browser clients must retain it. Every later resource is checked against that session; unknown and cross-session identifiers receive the same safe `404`.
 
 ## Routes
 
@@ -87,7 +87,9 @@ The proposal action is selected by application policy, never by the request. A r
 }
 ```
 
-Proposals expire after the configured TTL. Approval does not execute. Execution revalidates ownership and live technical conditions, then records scenario-specific verification. Calling execute again after success returns the existing result; failed actions are not automatically retried.
+Proposals expire after the configured TTL. Approval does not execute. The public facade exposes explicit approval; declining to approve leaves the executor unauthorized. The internal development API also supports an explicit rejection transition, but it is not part of the public route surface above. Execution revalidates ownership and live technical conditions, then records scenario-specific verification. Calling execute again after success returns the existing result; failed actions are not automatically retried.
+
+Successful execution means more than an HTTP response from the executor. The application verifies that the incident is resolved and the workload is healthy, plus the relevant scenario condition: no blocking relationship, available pool capacity, or healthy `v1` active.
 
 ## Limits
 
@@ -127,6 +129,8 @@ Important statuses:
 | `503` | Investigation/provider temporarily unavailable. |
 
 Every application response includes `X-Request-ID`. A valid caller-provided UUID may be propagated; invalid values are replaced.
+
+Responses also set `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`. Production adds `Strict-Transport-Security: max-age=31536000; includeSubDomains`.
 
 ## Internal API boundary
 

@@ -18,7 +18,7 @@ The optional scripts target the internal development API at `http://localhost:80
 
 ## Offline coverage
 
-The suite uses fakes and dependency replacement for deterministic behavior. It covers incident lifecycles and coordination; genuine scenario setup; fixed diagnostics; log sanitization; runbook allowlisting; evidence IDs; strict tools and provider behavior; reference repair; prompt-injection boundaries; persistence; remediation policy, approval, idempotency, TOCTOU checks and verification; public sessions, limits and security headers; production configuration; and Host-aware health checks.
+The current suite contains **86 passing offline tests** and uses fakes and dependency replacement for deterministic behavior. It covers incident lifecycles and coordination; genuine scenario setup; fixed diagnostics; log sanitization; runbook allowlisting; evidence IDs; strict tools and provider behavior; reference repair; prompt-injection boundaries; persistence; remediation policy, approval, idempotency, TOCTOU checks and verification; public sessions, limits and security headers; production configuration; and Host-aware health checks.
 
 ## Deterministic agent evaluator
 
@@ -47,6 +47,8 @@ Repository tests and the verified production record in [DEPLOYMENT.md](DEPLOYMEN
 - **Bad deployment:** genuine `UndefinedColumn`, supported `v2-bad` correlation, valid deployment/runbook evidence, approved rollback, verified recovery.
 
 No performance benchmark or universal accuracy claim is made.
+
+Evidence and runbook membership validation establishes investigation-local provenance, not universal diagnostic correctness. The controlled production record demonstrates that the implemented workflows completed under the documented conditions; it is not an SRE accuracy benchmark, service-level objective, high-availability claim, or proof that arbitrary incidents can be diagnosed safely.
 
 ## Limitations
 
